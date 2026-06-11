@@ -1,0 +1,67 @@
+name: CI_CD iOS Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: Select build type
+        type: choice
+        required: true
+        default: Debug-CICD
+        options:
+          - Debug-CICD
+          - Release-CICD
+
+jobs:
+  ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Select lane
+        id: lane
+        run: |
+          if [[ "${{ github.event.inputs.preset }}" == "Release-CICD" ]]; then
+            echo "lane=release" >> $GITHUB_OUTPUT
+          else
+            echo "lane=build" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Fastlane
+        run: bundle exec fastlane ios ${{ steps.lane.outputs.lane }}
+
+      - name: Notify Teams (if configured)
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ -z "$TEAM_WEBHOOK_URL" ]; then
+            echo "No webhook configured"
+            exit 0
+          fi
+
+          curl -H "Content-Type: application/json" \
+          -d "{
+            \"@type\": \"MessageCard\",
+            \"@context\": \"https://schema.org/extensions\",
+            \"title\": \"Build ${STATUS}\",
+            \"text\": \"${RUN_URL}\"
+          }" \
+          "$TEAM_WEBHOOK_URL"
+``

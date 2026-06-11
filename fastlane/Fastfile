@@ -1,0 +1,54 @@
+default_platform(:ios)
+
+platform :ios do
+
+  desc "Build app (CI)"
+  lane :build do
+    project = ENV["CICD_PROJECT_FILE"] || "CI_CD_Project.xcodeproj"
+    scheme  = ENV["CICD_DEFAULT_SCHEME"] || "CI_CD_Project"
+    config  = ENV["CICD_DEFAULT_CONFIGURATION"] || "Debug"
+
+    build_app(
+      project: project,
+      scheme: scheme,
+      configuration: config,
+      clean: true,
+      skip_package_ipa: true
+    )
+  end
+
+  desc "Run unit tests"
+  lane :test do
+    project = ENV["CICD_PROJECT_FILE"] || "CI_CD_Project.xcodeproj"
+    scheme  = ENV["CICD_DEFAULT_SCHEME"] || "CI_CD_Project"
+    dest    = ENV["CICD_TEST_DESTINATION"] || "platform=iOS Simulator,name=iPhone 15"
+
+    run_tests(
+      project: project,
+      scheme: scheme,
+      destination: dest
+    )
+  end
+
+  desc "Release build to TestFlight"
+  lane :release do
+    project = ENV["CICD_PROJECT_FILE"]
+    scheme  = ENV["CICD_DEFAULT_SCHEME"]
+    notes   = ENV["RELEASE_NOTES"] || ""
+
+    match(type: "appstore", readonly: true)
+
+    build_app(
+      project: project,
+      scheme: scheme,
+      configuration: "Release",
+      clean: true
+    )
+
+    upload_to_testflight(
+      changelog: notes,
+      skip_waiting_for_build_processing: true
+    )
+  end
+
+end

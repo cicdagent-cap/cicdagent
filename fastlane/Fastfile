@@ -51,4 +51,33 @@ platform :ios do
     )
   end
 
+  desc "Build (ad-hoc) and distribute to Firebase App Distribution"
+  lane :firebase_distribute do
+    project = ENV["CICD_PROJECT_FILE"] || "cicd.xcodeproj"
+    scheme  = ENV["CICD_DEFAULT_SCHEME"] || "cicd"
+    config  = ENV["CICD_DEFAULT_CONFIGURATION"] || "Debug"
+    app_id  = ENV["FIREBASE_APP_ID"]
+    groups  = ENV["FIREBASE_GROUPS"] || "testers"
+    notes   = ENV["RELEASE_NOTES"] || "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}"
+
+    UI.user_error!("FIREBASE_APP_ID must be set") if app_id.nil? || app_id.empty?
+
+    match(type: "adhoc", readonly: true)
+
+    build_app(
+      project: project,
+      scheme: scheme,
+      configuration: config,
+      clean: true,
+      export_method: "ad-hoc"
+    )
+
+    firebase_app_distribution(
+      app: app_id,
+      groups: groups,
+      release_notes: notes,
+      firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"]
+    )
+  end
+
 end

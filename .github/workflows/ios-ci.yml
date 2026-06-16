@@ -1,0 +1,100 @@
+name: iOS CI/CD – Build & Firebase Distribute
+
+# ─── Triggers ────────────────────────────────────────────────────────────────
+# Runs on every push to every branch and on every pull-request.
+# Firebase distribution only happens on push events (not PRs).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# Cancel in-flight runs for the same branch/PR so we never queue stale builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ─── Jobs ─────────────────────────────────────────────────────────────────────
+jobs:
+  # ── 1. Test ────────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Run unit tests
+        run: bundle exec fastlane ios test
+        env:
+          CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
+          CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
+          CICD_TEST_DESTINATION: ${{ vars.CICD_TEST_DESTINATION }}
+
+  # ── 2. Build & Distribute to Firebase ─────────────────────────────────────
+  firebase-distribute:
+    name: Build & Distribute (Firebase)
+    runs-on: macos-latest
+    needs: test
+    # Only distribute on push events – not on pull-request builds.
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Build & upload to Firebase App Distribution
+        run: bundle exec fastlane ios firebase_distribute
+        env:
+          # ── Project ─────────────────────────────────────────────────────
+          CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
+          CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
+          CICD_DEFAULT_CONFIGURATION: ${{ vars.CICD_DEFAULT_CONFIGURATION }}
+          # ── Apple / code-signing ─────────────────────────────────────────
+          FASTLANE_BUNDLE_IDENTIFIER: ${{ vars.FASTLANE_BUNDLE_IDENTIFIER }}
+          FASTLANE_TEAM_ID: ${{ secrets.FASTLANE_TEAM_ID }}
+          FASTLANE_ITC_TEAM_ID: ${{ secrets.FASTLANE_ITC_TEAM_ID }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          # ── Firebase ─────────────────────────────────────────────────────
+          # FIREBASE_APP_ID  →  Settings > General > "App ID" in Firebase console
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          # FIREBASE_CLI_TOKEN  →  run `firebase login:ci` locally to generate
+          FIREBASE_CLI_TOKEN: ${{ secrets.FIREBASE_CLI_TOKEN }}
+          # Comma-separated tester group aliases defined in Firebase console
+          FIREBASE_GROUPS: ${{ vars.FIREBASE_GROUPS }}
+          RELEASE_NOTES: "Branch: ${{ github.ref_name }} | Commit: ${{ github.sha }}"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          if [ -z "$TEAM_WEBHOOK_URL" ]; then
+            echo "No webhook configured – skipping notification"
+            exit 0
+          fi
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"Build FAILED\",\"text\":\"${RUN_URL}\"}" \
+            "$TEAM_WEBHOOK_URL"
+        env:
+          TEAM_WEBHOOK_URL: ${{ secrets.TEAM_WEBHOOK_URL }}

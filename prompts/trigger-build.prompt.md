@@ -1,53 +1,73 @@
 # Trigger Build Flow
 
-## Step 1: Ask user
+## Step 1: Resolve workflow
 
-Provide:
-1. Workflow URL (default options):
-   - https://github.com/gma-org/gmap-ios/actions/workflows/Core.yml
-   - https://github.com/gma-org/gmap-ios/actions/workflows/DE.yml
-   - Custom (input text field)
-2. Branch name (default options):
-   - staging-trunk
-   - Custom (input text field)
+Ask the user:
+1. Workflow to trigger:
+   - List workflows found in `.github/workflows/` (auto-detected)
+   - Or: Custom URL
+2. Branch name:
+   - Current branch (default)
+   - Or: Custom branch
 
 ---
 
-## Step 2: Inspect workflow
+## Step 2: Inspect workflow inputs
 
 Run:
 
+```bash
 ./scripts/inspect_workflow_inputs.sh <workflow-url> <branch>
+```
+
+Parse the output and show only the discovered inputs to the user.
 
 ---
 
 ## Step 3: Ask inputs dynamically
 
-Show only discovered inputs
+Render only inputs returned by the inspect script.
 
-Example:
+Common inputs example:
 
-Provide:
-
+```
 1. preset:
-   - Debug-CICD
+   - Debug-CICD (default)
    - Release-CICD
 
-2. config_Override:
-   - None
-   - a: Feature A Enabled
-
-3. Release_Notes (optional)
+2. release_notes (optional, free text)
+```
 
 ---
 
 ## Step 4: Trigger build
 
-Before triggering, check local environment setup through the trigger script output.
+Check environment:
 
-Show this when configured:
+```bash
+./scripts/trigger_existing_workflow.sh <workflow-url> <branch> [inputs...]
+```
 
-Environment: Configured via local file or GitHub
+Show concise status:
+
+```
+Environment: Configured ✓
+Triggering: <workflow> on <branch>
+```
+
+If `GH_TOKEN` is missing:
+
+```
+Missing env setup → add GH_TOKEN to .notification.local.env
+```
+
+---
+
+## Step 5: Post-trigger
+
+After a successful trigger, offer:
+- View run: `gh run list --workflow=<name>`
+- Open PR against `main` if build is from a feature branch
 
 Show this when missing:
 

@@ -35,7 +35,7 @@ jobs:
         if: ${{ hashFiles('fastlane/Fastfile') != '' }}
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2'
+          ruby-version: '3.3'
           bundler-cache: true
 
       - name: Install dependencies (Fastlane)
@@ -57,6 +57,11 @@ jobs:
         run: |
           echo "Using Fastlane..."
           bundle exec fastlane ios ${{ steps.mode.outputs.mode }}
+        env:
+          FASTLANE_OPT_OUT_USAGE: "YES"
+          CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
+          CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
+          CICD_DEFAULT_CONFIGURATION: ${{ vars.CICD_DEFAULT_CONFIGURATION }}
 
       # ✅ FALLBACK PATH (NO FASTLANE)
       - name: Run xcodebuild (fallback)
@@ -64,8 +69,8 @@ jobs:
         run: |
           echo "Fastlane not found, using xcodebuild..."
 
-          PROJECT_FILE="${CICD_PROJECT_FILE:-CI_CD_Project.xcodeproj}"
-          SCHEME="${CICD_DEFAULT_SCHEME:-CI_CD_Project}"
+          PROJECT_FILE="${CICD_PROJECT_FILE:-__PROJECT_FILE__}"
+          SCHEME="${CICD_DEFAULT_SCHEME:-__SCHEME__}"
 
           if [[ "${{ steps.mode.outputs.mode }}" == "release" ]]; then
             CONFIG="Release"

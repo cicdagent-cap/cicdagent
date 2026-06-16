@@ -28,7 +28,7 @@ jobs:
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.2"
+          ruby-version: "3.3"
           bundler-cache: true
 
       - name: Install dependencies
@@ -37,6 +37,8 @@ jobs:
       - name: Run unit tests
         run: bundle exec fastlane ios test
         env:
+          FASTLANE_OPT_OUT_USAGE: "YES"
+          # Optional overrides – leave unset to use Fastfile defaults (cicd.xcodeproj / cicd scheme)
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
           CICD_TEST_DESTINATION: ${{ vars.CICD_TEST_DESTINATION }}
@@ -56,7 +58,7 @@ jobs:
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.2"
+          ruby-version: "3.3"
           bundler-cache: true
 
       - name: Install dependencies
@@ -65,6 +67,7 @@ jobs:
       - name: Build & upload to Firebase App Distribution
         run: bundle exec fastlane ios firebase_distribute
         env:
+          FASTLANE_OPT_OUT_USAGE: "YES"
           # ── Project ─────────────────────────────────────────────────────
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}

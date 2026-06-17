@@ -1,8 +1,6 @@
 default_platform(:ios)
 
 # Resolve an env var, falling back to `default` when the var is absent OR empty string.
-# GitHub Actions expands unset Variables/Secrets to "" — the plain `||` operator
-# in Ruby treats "" as truthy and never reaches the fallback, causing tool errors.
 def env_or(key, default)
   val = ENV[key].to_s.strip
   val.empty? ? default : val
@@ -29,12 +27,17 @@ platform :ios do
   lane :test do
     project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
     scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
-    dest    = env_or("CICD_TEST_DESTINATION", "platform=iOS Simulator,name=iPhone 15,OS=latest")
+
+    dest = env_or(
+      "CICD_TEST_DESTINATION",
+      "platform=iOS Simulator,name=iPhone 16,OS=18.5"
+    )
 
     run_tests(
       project: project,
       scheme: scheme,
-      destination: dest
+      destination: dest,
+      clean: true
     )
   end
 
@@ -66,9 +69,12 @@ platform :ios do
     config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
     app_id  = ENV["FIREBASE_APP_ID"].to_s.strip
     groups  = env_or("FIREBASE_GROUPS", "testers")
-    notes   = env_or("RELEASE_NOTES", "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}")
+    notes   = env_or(
+      "RELEASE_NOTES",
+      "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}"
+    )
 
-    UI.user_error!("FIREBASE_APP_ID must be set") if app_id.nil? || app_id.empty?
+    UI.user_error!("FIREBASE_APP_ID must be set") if app_id.empty?
 
     match(type: "adhoc", readonly: true)
 

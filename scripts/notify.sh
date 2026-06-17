@@ -4,6 +4,11 @@ set -euo pipefail
 LOCAL_ENV_FILE="${CICD_LOCAL_ENV_FILE:-.notification.local.env}"
 ENV_SOURCE=""
 
+# Always try to infer missing/local defaults before loading env.
+if [ -x "./scripts/bootstrap_local_env.sh" ]; then
+  ./scripts/bootstrap_local_env.sh "$LOCAL_ENV_FILE" || true
+fi
+
 if [ -f "${LOCAL_ENV_FILE}" ]; then
   ENV_SOURCE="${LOCAL_ENV_FILE}"
 elif [ -f "CI_CD_Project/.notification.local.env" ]; then

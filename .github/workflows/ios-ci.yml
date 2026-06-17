@@ -30,6 +30,9 @@ jobs:
   test:
     name: Unit Tests
     runs-on: macos-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    env:
+      FASTLANE_OPT_OUT_USAGE: "YES"
 
     steps:
       - name: Checkout
@@ -47,7 +50,6 @@ jobs:
       - name: Run unit tests
         run: bundle exec fastlane ios test
         env:
-          FASTLANE_OPT_OUT_USAGE: "YES"
           # Optional overrides – leave unset to use Fastfile defaults (cicd.xcodeproj / cicd scheme)
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
@@ -60,6 +62,8 @@ jobs:
     needs: test
     # Only distribute on push events – not on pull-request builds.
     if: github.event_name == 'push'
+    env:
+      FASTLANE_OPT_OUT_USAGE: "YES"
 
     steps:
       - name: Checkout
@@ -77,7 +81,6 @@ jobs:
       - name: Build & upload to Firebase App Distribution
         run: bundle exec fastlane ios firebase_distribute
         env:
-          FASTLANE_OPT_OUT_USAGE: "YES"
           # ── Project ─────────────────────────────────────────────────────
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
@@ -116,6 +119,8 @@ jobs:
     name: Manual Build (Preset)
     runs-on: macos-latest
     if: github.event_name == 'workflow_dispatch'
+    env:
+      FASTLANE_OPT_OUT_USAGE: "YES"
 
     steps:
       - name: Checkout
@@ -142,7 +147,6 @@ jobs:
       - name: Run preset lane
         run: bundle exec fastlane ios ${{ steps.lane.outputs.lane }}
         env:
-          FASTLANE_OPT_OUT_USAGE: "YES"
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
           CICD_DEFAULT_CONFIGURATION: ${{ vars.CICD_DEFAULT_CONFIGURATION }}

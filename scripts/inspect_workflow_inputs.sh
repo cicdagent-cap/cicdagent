@@ -14,16 +14,21 @@ if ! command -v gh >/dev/null; then
   exit 1
 fi
 
-if ! gh auth status >/dev/null 2>&1; then
-  echo "Run: gh auth login"
+GH_HOST=""
+REPO=""
+FILE=""
+
+if [[ "$WORKFLOW_URL" =~ ^https?://([^/]+)/([^/]+/[^/]+)/actions/workflows/([^/?#]+) ]]; then
+  GH_HOST="${BASH_REMATCH[1]}"
+  REPO="${BASH_REMATCH[2]}"
+  FILE="${BASH_REMATCH[3]}"
+else
+  echo "Invalid workflow URL"
   exit 1
 fi
 
-if [[ "$WORKFLOW_URL" =~ github.com/([^/]+/[^/]+)/actions/workflows/([^/?#]+) ]]; then
-  REPO="${BASH_REMATCH[1]}"
-  FILE="${BASH_REMATCH[2]}"
-else
-  echo "Invalid workflow URL"
+if ! gh auth status --hostname "$GH_HOST" >/dev/null 2>&1; then
+  echo "Run: gh auth login --hostname $GH_HOST"
   exit 1
 fi
 
@@ -31,6 +36,7 @@ echo "🔍 Inspecting inputs..."
 echo
 
 gh api \
+  --hostname "$GH_HOST" \
   -H "Accept: application/vnd.github.raw" \
   "/repos/$REPO/contents/.github/workflows/$FILE?ref=$REF_NAME" |
 ruby -ryaml -e '

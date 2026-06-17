@@ -41,23 +41,33 @@ if ! command -v gh >/dev/null; then
   exit 1
 fi
 
-if ! gh auth status >/dev/null 2>&1; then
-  echo "Run: gh auth login"
-  exit 1
-fi
+GH_HOST=""
+REPO=""
+WORKFLOW=""
 
-# Extract repo + workflow file
-if [[ "$TARGET" =~ github.com/([^/]+/[^/]+)/actions/workflows/([^/?#]+) ]]; then
-  REPO="${BASH_REMATCH[1]}"
-  WORKFLOW="${BASH_REMATCH[2]}"
+if [[ "$TARGET" =~ ^https?://([^/]+)/([^/]+/[^/]+)/actions/workflows/([^/?#]+) ]]; then
+  GH_HOST="${BASH_REMATCH[1]}"
+  REPO="${BASH_REMATCH[2]}"
+  WORKFLOW="${BASH_REMATCH[3]}"
 else
   echo "Invalid workflow URL"
   exit 1
 fi
 
+if [ "$GH_HOST" = "github.com" ]; then
+  REPO_SPEC="$REPO"
+else
+  REPO_SPEC="$GH_HOST/$REPO"
+fi
+
+if ! gh auth status --hostname "$GH_HOST" >/dev/null 2>&1; then
+  echo "Run: gh auth login --hostname $GH_HOST"
+  exit 1
+fi
+
 # Check for recent pending/in-progress runs to prevent accidental double triggers
 echo "Checking for recent runs..."
-RECENT_RUNS=$(gh run list --workflow "$WORKFLOW" --repo "$REPO" --limit 5 --json status,createdAt,headBranch --jq ".[] | select(.headBranch==\"$REF\" and (.status==\"pending\" or .status==\"in_progress\" or .status==\"queued\"))" 2>/dev/null || echo "")
+RECENT_RUNS=$(gh run list --workflow "$WORKFLOW" --repo "$REPO_SPEC" --limit 5 --json status,createdAt,headBranch --jq ".[] | select(.headBranch==\"$REF\" and (.status==\"pending\" or .status==\"in_progress\" or .status==\"queued\"))" 2>/dev/null || echo "")
 
 if [ -n "$RECENT_RUNS" ]; then
   echo "⚠️ A build for this workflow on branch '$REF' is already pending or in progress."
@@ -65,7 +75,7 @@ if [ -n "$RECENT_RUNS" ]; then
   exit 0
 fi
 
-COMMAND=(gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF")
+COMMAND=(gh workflow run "$WORKFLOW" --repo "$REPO_SPEC" --ref "$REF")
 
 for ARG in "$@"; do
   COMMAND+=(-f "$ARG")
@@ -108,9 +118,9 @@ fi
 
   echo "🔍 Monitoring build..."
 
-  gh run watch "$RUN_ID" --repo "$REPO" --exit-status >/dev/null 2>&1 || true
+  gh run watch "$RUN_ID" --repo "$REPO_SPEC" --exit-status >/dev/null 2>&1 || true
 
-  STATUS=$(gh run view "$RUN_ID" --repo "$REPO" --json conclusion --jq '.conclusion')
+  STATUS=$(gh run view "$RUN_ID" --repo "$REPO_SPEC" --json conclusion --jq '.conclusion')
 
   echo "Build status: $STATUS"
 

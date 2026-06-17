@@ -30,7 +30,7 @@ platform :ios do
 
     dest = env_or(
       "CICD_TEST_DESTINATION",
-      "platform=iOS Simulator,name=iPhone 16,OS=18.5"
+      "platform=iOS Simulator,name=iPhone 15,OS=latest"
     )
 
     run_tests(

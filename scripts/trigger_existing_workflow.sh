@@ -11,9 +11,12 @@ elif [ -f "CI_CD_Project/.notification.local.env" ]; then
 fi
 
 if [ -n "$ENV_SOURCE" ]; then
-  set -a
-  . "$ENV_SOURCE"
-  set +a
+  while IFS= read -r line; do
+    # Load only valid KEY=VALUE entries so placeholder text never breaks the script.
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      export "$line"
+    fi
+  done < "$ENV_SOURCE"
 fi
 
 if [ -n "${TEAM_WEBHOOK_URL:-${TEAMS_WEBHOOK_URL:-}}" ]; then

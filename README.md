@@ -2,6 +2,79 @@
 
 This repository contains an iOS Swift project with GitHub Actions, Fastlane, local build-trigger scripts, and a workspace CICD agent flow.
 
+## iOS CI/CD Pipeline (Generic Setup)
+
+Detected project defaults from this repo:
+
+- Project file: `cicd.xcodeproj`
+- Default scheme: `cicd`
+- Build configurations: `Debug`, `Release`
+- Test destination: `platform=iOS Simulator,name=iPhone 15,OS=latest`
+
+Workflow file:
+
+- `.github/workflows/ios-ci.yml`
+
+### Triggers
+
+- `push` (any branch): runs `ios test`, then `ios firebase_distribute`
+- `pull_request` (any branch): runs `ios test` only
+- `workflow_dispatch`: manual run with `preset` input:
+  - `Debug-CICD` -> `fastlane ios build`
+  - `Release-CICD` -> `fastlane ios release`
+
+Pipeline defaults:
+
+- Runner: `macos-latest`
+- Ruby: `3.3`
+- Fastlane analytics opt-out: `FASTLANE_OPT_OUT_USAGE=YES`
+- Concurrency: cancels in-progress runs on the same ref
+
+### Run Locally
+
+Install Ruby gems:
+
+```bash
+bundle install
+```
+
+Run lanes locally:
+
+```bash
+bundle exec fastlane ios test
+bundle exec fastlane ios build
+bundle exec fastlane ios release
+bundle exec fastlane ios firebase_distribute
+```
+
+### GitHub Secrets and Variables Setup
+
+Open:
+
+1. GitHub repository -> `Settings`
+2. `Secrets and variables` -> `Actions`
+
+Required **Secrets**:
+
+- `FIREBASE_APP_ID`
+- `FIREBASE_CLI_TOKEN`
+- `FASTLANE_TEAM_ID`
+- `FASTLANE_ITC_TEAM_ID`
+- `MATCH_GIT_URL`
+- `MATCH_PASSWORD`
+- `MATCH_GIT_BASIC_AUTHORIZATION`
+- `TEAM_WEBHOOK_URL` (optional)
+- `GH_TOKEN` (for auto-PR)
+
+Required **Variables**:
+
+- `CICD_PROJECT_FILE`
+- `CICD_DEFAULT_SCHEME`
+- `CICD_DEFAULT_CONFIGURATION`
+- `CICD_TEST_DESTINATION`
+- `FIREBASE_GROUPS`
+- `FASTLANE_BUNDLE_IDENTIFIER`
+
 ## Quick Start
 
 For local setup, copy the example environment file:

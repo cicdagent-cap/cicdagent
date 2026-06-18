@@ -75,6 +75,8 @@ jobs:
           fi
 
       - name: Resolve Swift Package Manager dependencies
+        continue-on-error: true
+        timeout-minutes: 5
         run: |
           xcodebuild -resolvePackageDependencies \
             -project "${CICD_PROJECT_FILE:-cicd.xcodeproj}" \

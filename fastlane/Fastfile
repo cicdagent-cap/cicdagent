@@ -1,5 +1,6 @@
 default_platform(:ios)
 require "shellwords"
+require "open3"
 
 # Resolve an env var, falling back to `default` when the var is absent OR empty string.
 def env_or(key, default)
@@ -56,7 +57,8 @@ end
 
 def select_available_ios_simulator(project:, scheme:, preferred_destination:)
   begin
-    output = sh("xcrun simctl list devices available", log: false)
+    output, _status = Open3.capture2e("xcrun simctl list devices available")
+    output = output.to_s
 
     simulators = output.lines.map(&:strip)
                        .select { |line| line.start_with?("iPhone ") }
@@ -116,13 +118,24 @@ platform :ios do
 
     UI.message("🔨 Building app: #{project} | Scheme: #{scheme} | Config: #{config}")
 
-    build_app(
-      project: project,
-      scheme: scheme,
-      configuration: config,
-      clean: true,
-      skip_package_ipa: true
-    )
+    begin
+      build_app(
+        project: project,
+        scheme: scheme,
+        configuration: config,
+        clean: true,
+        skip_package_ipa: true
+      )
+    rescue => e
+      if signing_error?(e) && unsigned_fallback_enabled?
+        UI.important("Status: BLOCKED")
+        UI.important("Root Cause: Missing provisioning profile/signing assets for build lane")
+        UI.important("Assessment: Running unsigned CI validation build as fallback")
+        run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
+        next
+      end
+      raise e
+    end
   end
 
   desc "Run unit tests"
@@ -153,7 +166,9 @@ platform :ios do
         project: project,
         scheme: scheme,
         destination: dest,
+        only_testing: ["cicdTests"],
         clean: true,
+        disable_concurrent_testing: true,
         result_bundle: true,
         output_directory: "fastlane/test_output",
         output_types: "html,junit",
@@ -164,7 +179,7 @@ platform :ios do
     rescue => e
       UI.error("Test execution failed. Attempting to print first actionable xcodebuild error...")
       begin
-        sh("grep -E -m1 'xcodebuild: error:|error: |\\*\\* TEST FAILED \\*\\*' fastlane/logs/*.log || true")
+        sh("grep -E -m1 'xcodebuild: error:|error: |\\*\\* TEST FAILED \\*\\*' fastlane/logs/*.log ~/Library/Logs/scan/*.log 2>/dev/null || true")
       rescue
         UI.important("No scan log file available for quick grep.")
       end

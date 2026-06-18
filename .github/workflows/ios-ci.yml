@@ -89,6 +89,11 @@ jobs:
           echo "CICD_TEST_DESTINATION=$DEST" >> "$GITHUB_ENV"
           echo "Selected simulator destination: $DEST"
 
+      - name: Prepare simulator runtime
+        run: |
+          xcrun simctl shutdown all || true
+          xcrun simctl delete unavailable || true
+
       - name: Print Xcode and simulator inventory
         run: |
           xcodebuild -version

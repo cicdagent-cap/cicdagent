@@ -6,6 +6,53 @@ def env_or(key, default)
   val.empty? ? default : val
 end
 
+def signing_error?(exception)
+  msg = exception.to_s.downcase
+  patterns = [
+    "no provisioning profile",
+    "no profiles for",
+    "provisioning profile",
+    "code signing",
+    "requires a provisioning profile"
+  ]
+  patterns.any? { |p| msg.include?(p) }
+end
+
+def missing_signing_assets?
+  keys = %w[
+    FASTLANE_TEAM_ID
+    FASTLANE_ITC_TEAM_ID
+    MATCH_GIT_URL
+    MATCH_PASSWORD
+  ]
+  keys.any? { |k| ENV[k].to_s.strip.empty? }
+end
+
+def poc_or_demo_repo?
+  repo = ENV["GITHUB_REPOSITORY"].to_s.downcase
+  repo.include?("poc") || repo.include?("demo")
+end
+
+def unsigned_fallback_enabled?
+  env_or("CICD_UNSIGNED_FALLBACK", "auto") == "true" ||
+    poc_or_demo_repo? ||
+    missing_signing_assets?
+end
+
+def run_unsigned_validation_build(project:, scheme:, configuration:)
+  UI.important("Switching to unsigned CI validation mode (compile/test only).")
+  build_app(
+    project: project,
+    scheme: scheme,
+    configuration: configuration,
+    clean: true,
+    skip_codesigning: true,
+    skip_package_ipa: true,
+    xcargs: "CODE_SIGNING_ALLOWED=NO"
+  )
+  UI.important("IPA generation is unavailable until signing assets are configured.")
+end
+
 platform :ios do
 
   # ==================== BEFORE ALL SETUP ====================
@@ -72,14 +119,25 @@ platform :ios do
 
     UI.message("📦 Building IPA: #{project} | Scheme: #{scheme} | Export: #{export_method}")
 
-    build_app(
-      project: project,
-      scheme: scheme,
-      configuration: config,
-      clean: true,
-      export_method: export_method,
-      output_name: "cicd.ipa"
-    )
+    begin
+      build_app(
+        project: project,
+        scheme: scheme,
+        configuration: config,
+        clean: true,
+        export_method: export_method,
+        output_name: "cicd.ipa"
+      )
+    rescue => e
+      if signing_error?(e) && unsigned_fallback_enabled?
+        UI.important("Status: BLOCKED")
+        UI.important("Root Cause: Missing provisioning profile/signing assets")
+        UI.important("Assessment: Running unsigned CI validation build for POC/demo or missing-signing setup")
+        run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
+        next
+      end
+      raise e
+    end
 
     UI.success("✓ IPA built successfully!")
   end
@@ -94,6 +152,9 @@ platform :ios do
     app_id  = ENV["FIREBASE_APP_ID"].to_s.strip
     groups  = env_or("FIREBASE_GROUPS", "testers")
     firebase_token = ENV["FIREBASE_TOKEN"].to_s.strip
+    if firebase_token.empty?
+      firebase_token = ENV["FIREBASE_CLI_TOKEN"].to_s.strip
+    end
     
     notes   = env_or(
       "RELEASE_NOTES",
@@ -116,14 +177,29 @@ platform :ios do
     UI.message("   Notes: #{notes}")
 
     # Build IPA with ad-hoc provisioning
-    build_app(
-      project: project,
-      scheme: scheme,
-      configuration: config,
-      clean: true,
-      export_method: "ad-hoc",
-      output_name: "cicd.ipa"
-    )
+    begin
+      build_app(
+        project: project,
+        scheme: scheme,
+        configuration: config,
+        clean: true,
+        export_method: "ad-hoc",
+        output_name: "cicd.ipa"
+      )
+    rescue => e
+      if signing_error?(e) && unsigned_fallback_enabled?
+        UI.important("Status: BLOCKED")
+        UI.important("Root Cause: Missing provisioning profile for bundle id #{env_or("FASTLANE_BUNDLE_IDENTIFIER", "(unknown)")}")
+        UI.important("Assessment: This repository does not have signing assets configured.")
+        UI.important("Options:")
+        UI.important("1. CI Validation Build (Recommended for POC) - compile/test only, no IPA")
+        UI.important("2. Signed Build - configure certificates, profiles, and App Store Connect credentials")
+        run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
+        UI.important("Skipping Firebase upload because signed IPA is unavailable.")
+        next
+      end
+      raise e
+    end
 
     # Distribute via Firebase CLI
     sh("firebase appdistribution:distribute cicd.ipa " \
@@ -170,7 +246,10 @@ platform :ios do
 
   desc "Notify Teams of build status"
   lane :notify_teams do |options|
-    webhook_url = ENV["TEAMS_WEBHOOK_URL"]
+    webhook_url = ENV["TEAM_WEBHOOK_URL"].to_s.strip
+    if webhook_url.empty?
+      webhook_url = ENV["TEAMS_WEBHOOK_URL"].to_s.strip
+    end
     
     unless webhook_url && !webhook_url.empty?
       UI.message("⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification")

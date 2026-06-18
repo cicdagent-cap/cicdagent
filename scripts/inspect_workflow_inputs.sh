@@ -2,7 +2,7 @@
 set -euo pipefail
 
 WORKFLOW_URL="${1:-}"
-REF_NAME="${2:-}"
+REF_NAME="${2:-main}"
 LOCAL_ENV_FILE="${CICD_LOCAL_ENV_FILE:-.notification.local.env}"
 
 has_real_token() {
@@ -16,10 +16,12 @@ has_real_token() {
   return 0
 }
 
-if [ -z "$WORKFLOW_URL" ] || [ -z "$REF_NAME" ]; then
-  echo "Usage: $0 <workflow-url> <branch>"
+if [ -z "$WORKFLOW_URL" ]; then
+  echo "Usage: $0 <workflow-url> [branch=main]"
   exit 1
 fi
+
+echo "Branch selected: $REF_NAME"
 
 if ! command -v gh >/dev/null; then
   echo "Install GitHub CLI: https://cli.github.com/"
@@ -37,6 +39,14 @@ if [ -f "$LOCAL_ENV_FILE" ]; then
       export "$line"
     fi
   done < "$LOCAL_ENV_FILE"
+fi
+
+# If placeholder token values are loaded, unset them so gh can use stored keychain auth.
+if ! has_real_token "${GH_TOKEN:-}"; then
+  unset GH_TOKEN || true
+fi
+if ! has_real_token "${GITHUB_TOKEN:-}"; then
+  unset GITHUB_TOKEN || true
 fi
 
 GH_HOST=""

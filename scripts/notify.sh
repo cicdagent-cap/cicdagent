@@ -45,14 +45,23 @@ case "${STATUS}" in
   success)
     READABLE_STATUS="✅ Build Successful"
     ;;
+  error)
+    READABLE_STATUS="❌ Build Error"
+    ;;
   failure)
     READABLE_STATUS="❌ Build Failed"
+    ;;
+  stopped)
+    READABLE_STATUS="⛔ Build Stopped"
     ;;
   cancelled)
     READABLE_STATUS="⛔ Build Cancelled"
     ;;
+  started)
+    READABLE_STATUS="🚀 Build Started"
+    ;;
   triggered)
-    READABLE_STATUS="🚀 Build Triggered"
+    READABLE_STATUS="🚀 Build Started"
     ;;
   *)
     READABLE_STATUS="Build Status: ${STATUS}"

@@ -1,5 +1,18 @@
 # Create Pipeline Flow
 
+## Step 0: Run required preflight
+
+Run:
+
+```bash
+./scripts/preflight_validate.sh --action create-pipeline
+```
+
+If preflight is FAIL/BLOCKED:
+- Do not stop at generic errors.
+- Explain missing prerequisites and exact remediation.
+- Continue with safe preparation steps where possible.
+
 ## Step 1: Infer project context
 
 Before asking the user anything, scan the workspace:
@@ -54,6 +67,8 @@ Always include:
 - `FASTLANE_OPT_OUT_USAGE: "YES"` on every Fastlane step
 - `concurrency` block to cancel stale runs
 
+Avoid duplicating existing workflow components.
+
 ---
 
 ## Step 5: Auto-commit and open PR
@@ -87,6 +102,25 @@ Next steps:
 1. Commit & push file
 2. Open GitHub Actions
 3. Run pipeline
+
+---
+
+## Required Response Format
+
+### Status
+PASS / FAIL / BLOCKED
+
+### Findings
+- Explicit findings with root cause and impact
+
+### Missing Prerequisites
+- Explicit list (or "None")
+
+### Recommended Actions
+1. Ordered by priority
+
+### Next Action
+- Single best next step
 
 ---
 

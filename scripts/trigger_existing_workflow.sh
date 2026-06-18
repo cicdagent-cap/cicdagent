@@ -15,6 +15,20 @@ has_real_token() {
   return 0
 }
 
+has_real_webhook() {
+  local hook="${1:-}"
+  if [[ -z "$hook" ]]; then
+    return 1
+  fi
+  if [[ "$hook" =~ ^\<.*\>$ ]] || [[ "$hook" =~ webhook-url ]] || [[ "$hook" =~ example ]]; then
+    return 1
+  fi
+  if [[ ! "$hook" =~ ^https?:// ]]; then
+    return 1
+  fi
+  return 0
+}
+
 # Always try to infer missing/local defaults before loading env.
 if [ -x "./scripts/bootstrap_local_env.sh" ]; then
   ./scripts/bootstrap_local_env.sh "$LOCAL_ENV_FILE" || true
@@ -35,6 +49,14 @@ if [ -n "$ENV_SOURCE" ]; then
   done < "$ENV_SOURCE"
 fi
 
+# If placeholder token values are loaded, unset them so gh can use stored keychain auth.
+if ! has_real_token "${GH_TOKEN:-}"; then
+  unset GH_TOKEN || true
+fi
+if ! has_real_token "${GITHUB_TOKEN:-}"; then
+  unset GITHUB_TOKEN || true
+fi
+
 if [ -n "${TEAM_WEBHOOK_URL:-${TEAMS_WEBHOOK_URL:-}}" ]; then
   echo "Environment: Configured via local file or GitHub"
 else
@@ -43,14 +65,16 @@ else
 fi
 
 TARGET="${1:-}"
-REF="${2:-}"
+REF="${2:-main}"
 
 shift 2 || true
 
-if [ -z "$TARGET" ] || [ -z "$REF" ]; then
-  echo "Usage: $0 <workflow-url> <branch> [input=value...]"
+if [ -z "$TARGET" ]; then
+  echo "Usage: $0 <workflow-url> [branch=main] [input=value...]"
   exit 1
 fi
+
+echo "Branch selected: $REF"
 
 if ! command -v gh >/dev/null; then
   echo "Install GitHub CLI"
@@ -116,13 +140,22 @@ fi
 
 RUN_URL=$(echo "$OUTPUT" | grep -Eo 'https://[^/]+/.*/actions/runs/[0-9]+' | tail -n1 || true)
 
+if [ -z "$RUN_URL" ]; then
+  # Fallback for CLI outputs that omit a direct run URL.
+  RUN_URL=$(gh run list --workflow "$WORKFLOW" --repo "$REPO_SPEC" --branch "$REF" --limit 1 --json url --jq '.[0].url' 2>/dev/null || true)
+fi
+
 if [ -n "$RUN_URL" ]; then
   echo
   echo "✅ Build triggered successfully"
   echo "Run URL: $RUN_URL"
 
-  # Best-effort notification at trigger time; completion is still handled by watcher.
-  ./scripts/notify.sh "triggered" "$RUN_URL" "$REF" || true
+  # Best-effort notification at build start; completion is still handled by watcher.
+  if has_real_webhook "${TEAM_WEBHOOK_URL:-${TEAMS_WEBHOOK_URL:-}}"; then
+    ./scripts/notify.sh "started" "$RUN_URL" "$REF" || true
+  else
+    echo "ℹ️ Start notification skipped: TEAM_WEBHOOK_URL/TEAMS_WEBHOOK_URL is missing or placeholder."
+  fi
 else
   echo "⚠️ Could not extract run URL"
 fi

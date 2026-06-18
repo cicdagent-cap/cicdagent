@@ -174,7 +174,7 @@ platform :ios do
         output_types: "html,junit",
         buildlog_path: "fastlane/logs",
         derived_data_path: "fastlane/derived_data",
-        xcargs: "CODE_SIGNING_ALLOWED=NO"
+        xcargs: "CODE_SIGNING_ALLOWED=NO -parallel-testing-enabled NO"
       )
     rescue => e
       UI.error("Test execution failed. Attempting to print first actionable xcodebuild error...")

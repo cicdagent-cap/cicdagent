@@ -4,6 +4,17 @@ set -euo pipefail
 LOCAL_ENV_FILE="${CICD_LOCAL_ENV_FILE:-.notification.local.env}"
 ENV_SOURCE=""
 
+has_real_token() {
+  local tok="${1:-}"
+  if [[ -z "$tok" ]]; then
+    return 1
+  fi
+  if [[ "$tok" =~ ^\<.*\>$ ]] || [[ "$tok" =~ personal-access-token ]] || [[ "$tok" =~ example ]]; then
+    return 1
+  fi
+  return 0
+}
+
 # Always try to infer missing/local defaults before loading env.
 if [ -x "./scripts/bootstrap_local_env.sh" ]; then
   ./scripts/bootstrap_local_env.sh "$LOCAL_ENV_FILE" || true
@@ -66,8 +77,13 @@ else
 fi
 
 if ! gh auth status --hostname "$GH_HOST" >/dev/null 2>&1; then
-  echo "Run: gh auth login --hostname $GH_HOST"
-  exit 1
+  if has_real_token "${GH_TOKEN:-}" || has_real_token "${GITHUB_TOKEN:-}"; then
+    echo "Auth: using token from environment"
+  else
+    echo "Run: gh auth login --hostname $GH_HOST"
+    echo "Or set GH_TOKEN in $LOCAL_ENV_FILE"
+    exit 1
+  fi
 fi
 
 # Check for recent pending/in-progress runs to prevent accidental double triggers
@@ -98,7 +114,7 @@ if [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
   exit "$COMMAND_EXIT_CODE"
 fi
 
-RUN_URL=$(echo "$OUTPUT" | grep -Eo 'https://github.com/.*/actions/runs/[0-9]+' | tail -n1 || true)
+RUN_URL=$(echo "$OUTPUT" | grep -Eo 'https://[^/]+/.*/actions/runs/[0-9]+' | tail -n1 || true)
 
 if [ -n "$RUN_URL" ]; then
   echo

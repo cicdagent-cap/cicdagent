@@ -8,11 +8,28 @@ end
 
 platform :ios do
 
+  # ==================== BEFORE ALL SETUP ====================
+  before_all do
+    # Set timeout environment variables to prevent xcodebuild timeout errors
+    ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"] = "180"
+    ENV["FASTLANE_XCODEBUILD_SETTINGS_RETRIES"] = "10"
+    ENV["XCBUILD_TIMEOUT"] = "300"
+    ENV["FASTLANE_OPT_OUT_USAGE"] = "YES"
+    
+    UI.message("🔧 Fastlane environment configured:")
+    UI.message("   - FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: #{ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"]}")
+    UI.message("   - FASTLANE_XCODEBUILD_SETTINGS_RETRIES: #{ENV["FASTLANE_XCODEBUILD_SETTINGS_RETRIES"]}")
+  end
+
+  # ==================== BUILD & TEST LANES ====================
+
   desc "Build app (CI)"
   lane :build do
     project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
     scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
     config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
+
+    UI.message("🔨 Building app: #{project} | Scheme: #{scheme} | Config: #{config}")
 
     build_app(
       project: project,
@@ -33,34 +50,41 @@ platform :ios do
       "platform=iOS Simulator,name=iPhone 15,OS=latest"
     )
 
+    UI.message("✅ Running tests: #{project} | Scheme: #{scheme}")
+    UI.message("   Destination: #{dest}")
+
     run_tests(
       project: project,
       scheme: scheme,
       destination: dest,
       clean: true
     )
+
+    UI.success("✓ All tests passed!")
   end
 
-  desc "Release build to TestFlight"
-  lane :release do
+  desc "Build IPA for distribution"
+  lane :build_ipa do
     project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
     scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
-    notes   = env_or("RELEASE_NOTES", "")
+    config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
+    export_method = env_or("IPA_EXPORT_METHOD", "ad-hoc")
 
-    match(type: "appstore", readonly: true)
+    UI.message("📦 Building IPA: #{project} | Scheme: #{scheme} | Export: #{export_method}")
 
     build_app(
       project: project,
       scheme: scheme,
-      configuration: "Release",
-      clean: true
+      configuration: config,
+      clean: true,
+      export_method: export_method,
+      output_name: "cicd.ipa"
     )
 
-    upload_to_testflight(
-      changelog: notes,
-      skip_waiting_for_build_processing: true
-    )
+    UI.success("✓ IPA built successfully!")
   end
+
+  # ==================== FIREBASE DISTRIBUTION ====================
 
   desc "Build (ad-hoc) and distribute to Firebase App Distribution"
   lane :firebase_distribute do
@@ -69,28 +93,148 @@ platform :ios do
     config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
     app_id  = ENV["FIREBASE_APP_ID"].to_s.strip
     groups  = env_or("FIREBASE_GROUPS", "testers")
+    firebase_token = ENV["FIREBASE_TOKEN"].to_s.strip
+    
     notes   = env_or(
       "RELEASE_NOTES",
       "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}"
     )
 
-    UI.user_error!("FIREBASE_APP_ID must be set") if app_id.empty?
+    if app_id.empty?
+      UI.error("❌ FIREBASE_APP_ID must be set in GitHub secrets")
+      UI.user_error!("FIREBASE_APP_ID not configured")
+    end
 
-    match(type: "adhoc", readonly: true)
+    if firebase_token.empty?
+      UI.error("❌ FIREBASE_TOKEN must be set in GitHub secrets")
+      UI.user_error!("FIREBASE_TOKEN not configured")
+    end
 
+    UI.message("🔥 Distributing to Firebase App Distribution")
+    UI.message("   App ID: #{app_id}")
+    UI.message("   Groups: #{groups}")
+    UI.message("   Notes: #{notes}")
+
+    # Build IPA with ad-hoc provisioning
     build_app(
       project: project,
       scheme: scheme,
       configuration: config,
       clean: true,
-      export_method: "ad-hoc"
+      export_method: "ad-hoc",
+      output_name: "cicd.ipa"
     )
 
-    firebase_app_distribution(
-      app: app_id,
-      groups: groups,
-      release_notes: notes,
-      firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"]
+    # Distribute via Firebase CLI
+    sh("firebase appdistribution:distribute cicd.ipa " \
+       "--app #{app_id} " \
+       "--release-notes '#{notes}' " \
+       "--groups '#{groups}' " \
+       "--token #{firebase_token}")
+
+    UI.success("✓ App distributed to Firebase successfully!")
+  end
+
+  # ==================== RELEASE LANES ====================
+
+  desc "Release build to TestFlight"
+  lane :release do
+    project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
+    scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
+    notes   = env_or("RELEASE_NOTES", "Bug fixes and improvements")
+
+    UI.message("🚀 Preparing TestFlight release: #{project}")
+
+    # Install signing certificates
+    match(type: "appstore", readonly: true)
+
+    # Build and sign for App Store
+    build_app(
+      project: project,
+      scheme: scheme,
+      configuration: "Release",
+      clean: true,
+      export_method: "app-store"
+    )
+
+    # Upload to TestFlight
+    upload_to_testflight(
+      changelog: notes,
+      skip_waiting_for_build_processing: true
+    )
+
+    UI.success("✓ Release submitted to TestFlight successfully!")
+  end
+
+  # ==================== NOTIFICATIONS ====================
+
+  desc "Notify Teams of build status"
+  lane :notify_teams do |options|
+    webhook_url = ENV["TEAMS_WEBHOOK_URL"]
+    
+    unless webhook_url && !webhook_url.empty?
+      UI.message("⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification")
+      return
+    end
+
+    status = options[:status] || "unknown"
+    message = options[:message] || "Build #{status}"
+
+    color = case status
+            when "success"
+              "28A745"
+            when "failure"
+              "DC3545"
+            when "started"
+              "0078D4"
+            else
+              "FFC107"
+            end
+
+    emoji = case status
+            when "success"
+              "✅"
+            when "failure"
+              "❌"
+            when "started"
+              "🚀"
+            else
+              "⏹️"
+            end
+
+    UI.message("📧 Sending Teams notification: #{emoji} #{message}")
+
+    payload = {
+      "@type" => "MessageCard",
+      "@context" => "https://schema.org/extensions",
+      "summary" => message,
+      "themeColor" => color,
+      "sections" => [
+        {
+          "activityTitle" => "#{emoji} iOS Build #{status.capitalize}",
+          "facts" => [
+            { "name" => "Workflow", "value" => ENV["GITHUB_WORKFLOW"] || "Local" },
+            { "name" => "Branch", "value" => ENV["GITHUB_REF_NAME"] || git_branch }
+          ]
+        }
+      ]
+    }
+
+    sh("curl -X POST -H 'Content-Type: application/json' " \
+       "-d '#{payload.to_json}' " \
+       "'#{webhook_url}'")
+  end
+
+  # ==================== ERROR HANDLING ====================
+
+  error do |lane, exception|
+    UI.error("❌ Fastlane error in lane: #{lane}")
+    UI.error("Error message: #{exception}")
+    
+    # Notify Teams of failure if configured
+    notify_teams(
+      status: "failure",
+      message: "Build failed in lane: #{lane}"
     )
   end
 

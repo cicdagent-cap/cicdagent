@@ -1,6 +1,7 @@
 default_platform(:ios)
 require "shellwords"
 require "open3"
+require "fileutils"
 
 # Resolve an env var, falling back to `default` when the var is absent OR empty string.
 def env_or(key, default)
@@ -53,6 +54,25 @@ def run_unsigned_validation_build(project:, scheme:, configuration:)
     xcargs: "CODE_SIGNING_ALLOWED=NO"
   )
   UI.important("IPA generation is unavailable until signing assets are configured.")
+end
+
+def firebase_app_id_from_google_service_plist
+  plist_path = env_or("FIREBASE_PLIST_PATH", "cicd/GoogleService-Info.plist")
+  return ["", plist_path] unless File.exist?(plist_path)
+
+  content = File.read(plist_path)
+  match = content.match(/<key>GOOGLE_APP_ID<\/key>\s*<string>([^<]+)<\/string>/m)
+  app_id = match ? match[1].to_s.strip : ""
+  [app_id, plist_path]
+rescue => e
+  UI.important("Could not parse Firebase plist at #{plist_path}: #{e}")
+  ["", plist_path]
+end
+
+def write_distribution_status(status:, reason:)
+  status_file = env_or("CICD_DISTRIBUTION_STATUS_FILE", "fastlane/firebase_distribution_status.env")
+  FileUtils.mkdir_p(File.dirname(status_file))
+  File.write(status_file, "DISTRIBUTION_STATUS=#{status}\nDISTRIBUTION_REASON=#{reason}\n")
 end
 
 def select_available_ios_simulator(project:, scheme:, preferred_destination:)
@@ -234,20 +254,33 @@ platform :ios do
     if firebase_token.empty?
       firebase_token = ENV["FIREBASE_CLI_TOKEN"].to_s.strip
     end
+
+    plist_app_id, plist_path = firebase_app_id_from_google_service_plist
+    if app_id.empty? && !plist_app_id.empty?
+      app_id = plist_app_id
+      UI.important("FIREBASE_APP_ID not set. Falling back to GOOGLE_APP_ID from #{plist_path}")
+    end
     
     notes   = env_or(
       "RELEASE_NOTES",
       "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}"
     )
 
-    if app_id.empty?
-      UI.error("❌ FIREBASE_APP_ID must be set in GitHub secrets")
-      UI.user_error!("FIREBASE_APP_ID not configured")
-    end
+    missing_prereqs = []
+    missing_prereqs << "FIREBASE_APP_ID" if app_id.empty?
+    missing_prereqs << "FIREBASE_TOKEN or FIREBASE_CLI_TOKEN" if firebase_token.empty?
 
-    if firebase_token.empty?
-      UI.error("❌ FIREBASE_TOKEN must be set in GitHub secrets")
-      UI.user_error!("FIREBASE_TOKEN not configured")
+    if missing_prereqs.any?
+      UI.important("Status: BLOCKED")
+      UI.important("Missing Prerequisites:")
+      missing_prereqs.each { |item| UI.important("- #{item}") }
+      UI.important("⚠ Skipping Firebase Distribution")
+      UI.important("✅ Build and test stages can continue")
+      write_distribution_status(
+        status: "skipped",
+        reason: "Missing prerequisites: #{missing_prereqs.join(', ')}"
+      )
+      next
     end
 
     UI.message("🔥 Distributing to Firebase App Distribution")
@@ -275,6 +308,10 @@ platform :ios do
         UI.important("2. Signed Build - configure certificates, profiles, and App Store Connect credentials")
         run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
         UI.important("Skipping Firebase upload because signed IPA is unavailable.")
+        write_distribution_status(
+          status: "skipped",
+          reason: "Signed IPA unavailable due to missing signing assets"
+        )
         next
       end
       raise e
@@ -288,6 +325,7 @@ platform :ios do
        "--token #{firebase_token}")
 
     UI.success("✓ App distributed to Firebase successfully!")
+    write_distribution_status(status: "distributed", reason: "Firebase upload completed")
   end
 
   # ==================== RELEASE LANES ====================

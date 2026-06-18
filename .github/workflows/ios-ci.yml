@@ -75,6 +75,7 @@ jobs:
           fi
 
       - name: Resolve Swift Package Manager dependencies
+        if: ${{ vars.CICD_PRE_RESOLVE_SPM == 'true' }}
         continue-on-error: true
         timeout-minutes: 5
         run: |

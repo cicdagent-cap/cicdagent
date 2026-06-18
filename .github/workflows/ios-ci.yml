@@ -31,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send started notification
+        continue-on-error: true
         env:
           WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL || secrets.TEAM_WEBHOOK_URL }}
         run: |
@@ -41,7 +42,7 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -H "Content-Type: application/json" \
             -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"Build Triggered\",\"text\":\"🚀 Build started on branch ${{ github.ref_name }}\\n${RUN_URL}\"}" \
-            "$WEBHOOK_URL"
+            "$WEBHOOK_URL" || true
 
   # ── 1. Test ────────────────────────────────────────────────────────────────
   test:
@@ -65,13 +66,73 @@ jobs:
       - name: Install dependencies
         run: bundle install
 
+      - name: Install CocoaPods dependencies (if Podfile exists)
+        run: |
+          if [ -f Podfile ]; then
+            bundle exec pod install --repo-update
+          else
+            echo "No Podfile found; skipping CocoaPods bootstrap"
+          fi
+
+      - name: Resolve Swift Package Manager dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "${CICD_PROJECT_FILE:-cicd.xcodeproj}" \
+            -scheme "${CICD_DEFAULT_SCHEME:-cicd}"
+
+      - name: Select available simulator destination
+        run: |
+          DEST=$(xcodebuild -showdestinations \
+            -project "${CICD_PROJECT_FILE:-cicd.xcodeproj}" \
+            -scheme "${CICD_DEFAULT_SCHEME:-cicd}" 2>/dev/null | \
+            ruby -e 'simulators = STDIN.read.lines.map(&:strip).select { |l| l.include?("platform:iOS Simulator") && l.include?("name:") }.map { |l| (l[/name:([^}]+)/, 1] || "").strip }.reject(&:empty?).uniq; chosen = simulators.find { |name| name.start_with?("iPhone") } || simulators.first || "iPhone 16"; puts "platform=iOS Simulator,name=#{chosen},OS=latest"')
+          echo "CICD_TEST_DESTINATION=$DEST" >> "$GITHUB_ENV"
+          echo "Selected simulator destination: $DEST"
+
+      - name: Print Xcode and simulator inventory
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | sed -n '1,200p'
+
       - name: Run unit tests
+        id: run_unit_tests
+        continue-on-error: true
         run: bundle exec fastlane ios test
         env:
           # Optional overrides – leave unset to use Fastfile defaults (cicd.xcodeproj / cicd scheme)
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
-          CICD_TEST_DESTINATION: ${{ vars.CICD_TEST_DESTINATION }}
+          CICD_TEST_DESTINATION: ${{ env.CICD_TEST_DESTINATION || vars.CICD_TEST_DESTINATION }}
+
+      - name: Print first xcodebuild failure reason
+        if: steps.run_unit_tests.outcome != 'success'
+        run: |
+          echo "Unit test step failed. Extracting first actionable error line..."
+          FAIL_LINE=$(grep -E -m1 "xcodebuild: error:|error: |\*\* TEST FAILED \*\*" ~/Library/Logs/scan/*.log 2>/dev/null || true)
+          if [ -n "$FAIL_LINE" ]; then
+            echo "First xcodebuild failure: $FAIL_LINE"
+          else
+            echo "No direct xcodebuild error line found in scan logs. Showing tail:"
+            tail -n 120 ~/Library/Logs/scan/*.log 2>/dev/null || true
+          fi
+
+      - name: Upload scan logs and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-diagnostics-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            ~/Library/Logs/scan/**
+            fastlane/logs/**
+            fastlane/test_output/**
+            **/*.xcresult
+
+      - name: Fail job if tests failed
+        if: steps.run_unit_tests.outcome != 'success'
+        run: |
+          echo "Failing workflow because unit tests did not pass. See uploaded diagnostics artifact."
+          exit 1
 
   # ── 2. Build & Distribute to Firebase ─────────────────────────────────────
   firebase-distribute:
@@ -121,6 +182,7 @@ jobs:
 
       - name: Notify on failure
         if: failure()
+        continue-on-error: true
         run: |
           if [ -z "$TEAM_WEBHOOK_URL" ]; then
             echo "No webhook configured – skipping notification"
@@ -129,9 +191,9 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -H "Content-Type: application/json" \
             -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"Build FAILED\",\"text\":\"${RUN_URL}\"}" \
-            "$TEAM_WEBHOOK_URL"
+            "$TEAM_WEBHOOK_URL" || true
         env:
-          TEAM_WEBHOOK_URL: ${{ secrets.TEAM_WEBHOOK_URL }}
+          TEAM_WEBHOOK_URL: ${{ secrets.TEAM_WEBHOOK_URL || secrets.TEAMS_WEBHOOK_URL }}
 
   manual-build:
     name: Manual Build (Preset)
@@ -177,6 +239,7 @@ jobs:
     needs: [test, firebase-distribute, manual-build]
     steps:
       - name: Send final notification
+        continue-on-error: true
         env:
           WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL || secrets.TEAM_WEBHOOK_URL }}
           TEST_RESULT: ${{ needs.test.result }}
@@ -208,4 +271,4 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -H "Content-Type: application/json" \
             -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"${TITLE}\",\"text\":\"${ICON} Branch: ${{ github.ref_name }}\\nStatus: ${STATUS}\\n${RUN_URL}\"}" \
-            "$WEBHOOK_URL"
+            "$WEBHOOK_URL" || true

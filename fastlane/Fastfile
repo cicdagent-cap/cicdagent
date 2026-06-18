@@ -1,4 +1,5 @@
 default_platform(:ios)
+require "shellwords"
 
 # Resolve an env var, falling back to `default` when the var is absent OR empty string.
 def env_or(key, default)
@@ -53,6 +54,43 @@ def run_unsigned_validation_build(project:, scheme:, configuration:)
   UI.important("IPA generation is unavailable until signing assets are configured.")
 end
 
+def select_available_ios_simulator(project:, scheme:, preferred_destination:)
+  begin
+    output = sh("xcrun simctl list devices available", log: false)
+
+    simulators = output.lines.map(&:strip)
+                       .select { |line| line.start_with?("iPhone ") }
+                       .map { |line| line.sub(/\s*\(.+\)\s*$/, "").strip }
+                       .uniq
+
+    return preferred_destination if simulators.empty?
+
+    preferred_name = preferred_destination[/name=([^,]+)/, 1]
+    if preferred_name && simulators.include?(preferred_name)
+      return preferred_destination
+    end
+
+    chosen = simulators.find { |name| name.start_with?("iPhone") } || simulators.first
+    selected = "platform=iOS Simulator,name=#{chosen},OS=latest"
+    UI.important("Requested simulator was unavailable. Auto-selected: #{selected}")
+    selected
+  rescue => e
+    UI.important("Simulator auto-selection fallback failed: #{e}. Using requested destination.")
+    preferred_destination
+  end
+end
+
+def project_has_test_target?(project:, target_name:)
+  candidates = [
+    File.expand_path(File.join(project, "project.pbxproj"), Dir.pwd),
+    File.expand_path(File.join("..", project, "project.pbxproj"), Dir.pwd)
+  ]
+  pbxproj = candidates.find { |path| File.exist?(path) }
+  return false unless pbxproj
+
+  File.read(pbxproj).include?("/* #{target_name} */")
+end
+
 platform :ios do
 
   # ==================== BEFORE ALL SETUP ====================
@@ -92,20 +130,46 @@ platform :ios do
     project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
     scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
 
-    dest = env_or(
+    requested_dest = env_or(
       "CICD_TEST_DESTINATION",
       "platform=iOS Simulator,name=iPhone 15,OS=latest"
+    )
+
+    unless project_has_test_target?(project: project, target_name: "cicdTests")
+      UI.user_error!("Test target 'cicdTests' is missing from project #{project}")
+    end
+
+    dest = select_available_ios_simulator(
+      project: project,
+      scheme: scheme,
+      preferred_destination: requested_dest
     )
 
     UI.message("✅ Running tests: #{project} | Scheme: #{scheme}")
     UI.message("   Destination: #{dest}")
 
-    run_tests(
-      project: project,
-      scheme: scheme,
-      destination: dest,
-      clean: true
-    )
+    begin
+      run_tests(
+        project: project,
+        scheme: scheme,
+        destination: dest,
+        clean: true,
+        result_bundle: true,
+        output_directory: "fastlane/test_output",
+        output_types: "html,junit",
+        buildlog_path: "fastlane/logs",
+        derived_data_path: "fastlane/derived_data",
+        xcargs: "CODE_SIGNING_ALLOWED=NO"
+      )
+    rescue => e
+      UI.error("Test execution failed. Attempting to print first actionable xcodebuild error...")
+      begin
+        sh("grep -E -m1 'xcodebuild: error:|error: |\\*\\* TEST FAILED \\*\\*' fastlane/logs/*.log || true")
+      rescue
+        UI.important("No scan log file available for quick grep.")
+      end
+      raise e
+    end
 
     UI.success("✓ All tests passed!")
   end
@@ -253,7 +317,7 @@ platform :ios do
     
     unless webhook_url && !webhook_url.empty?
       UI.message("⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification")
-      return
+      next
     end
 
     status = options[:status] || "unknown"
@@ -299,9 +363,13 @@ platform :ios do
       ]
     }
 
-    sh("curl -X POST -H 'Content-Type: application/json' " \
-       "-d '#{payload.to_json}' " \
-       "'#{webhook_url}'")
+    begin
+      sh("curl --silent --show-error -X POST -H 'Content-Type: application/json' " \
+         "-d '#{payload.to_json}' " \
+         "'#{webhook_url}'")
+    rescue => e
+      UI.important("Notification delivery failed but will not fail the lane: #{e}")
+    end
   end
 
   # ==================== ERROR HANDLING ====================
@@ -311,10 +379,14 @@ platform :ios do
     UI.error("Error message: #{exception}")
     
     # Notify Teams of failure if configured
-    notify_teams(
-      status: "failure",
-      message: "Build failed in lane: #{lane}"
-    )
+    begin
+      notify_teams(
+        status: "failure",
+        message: "Build failed in lane: #{lane}"
+      )
+    rescue => notify_error
+      UI.important("An error occurred while executing the error block notification: #{notify_error}")
+    end
   end
 
 end

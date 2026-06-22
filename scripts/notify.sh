@@ -4,6 +4,11 @@ set -euo pipefail
 LOCAL_ENV_FILE="${CICD_LOCAL_ENV_FILE:-.notification.local.env}"
 ENV_SOURCE=""
 
+# Always try to infer missing/local defaults before loading env.
+if [ -x "./scripts/bootstrap_local_env.sh" ]; then
+  ./scripts/bootstrap_local_env.sh "$LOCAL_ENV_FILE" || true
+fi
+
 if [ -f "${LOCAL_ENV_FILE}" ]; then
   ENV_SOURCE="${LOCAL_ENV_FILE}"
 elif [ -f "CI_CD_Project/.notification.local.env" ]; then
@@ -11,9 +16,12 @@ elif [ -f "CI_CD_Project/.notification.local.env" ]; then
 fi
 
 if [ -n "${ENV_SOURCE}" ]; then
-  set -a
-  . "${ENV_SOURCE}"
-  set +a
+  while IFS= read -r line; do
+    # Load only valid KEY=VALUE entries so placeholder text never breaks the script.
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      export "$line"
+    fi
+  done < "${ENV_SOURCE}"
 fi
 
 STATUS="${1:-}"
@@ -37,14 +45,23 @@ case "${STATUS}" in
   success)
     READABLE_STATUS="✅ Build Successful"
     ;;
+  error)
+    READABLE_STATUS="❌ Build Error"
+    ;;
   failure)
     READABLE_STATUS="❌ Build Failed"
+    ;;
+  stopped)
+    READABLE_STATUS="⛔ Build Stopped"
     ;;
   cancelled)
     READABLE_STATUS="⛔ Build Cancelled"
     ;;
+  started)
+    READABLE_STATUS="🚀 Build Started"
+    ;;
   triggered)
-    READABLE_STATUS="🚀 Build Triggered"
+    READABLE_STATUS="🚀 Build Started"
     ;;
   *)
     READABLE_STATUS="Build Status: ${STATUS}"

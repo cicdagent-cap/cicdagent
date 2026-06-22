@@ -1,83 +1,445 @@
 default_platform(:ios)
+require "shellwords"
+require "open3"
+require "fileutils"
+
+# Resolve an env var, falling back to `default` when the var is absent OR empty string.
+def env_or(key, default)
+  val = ENV[key].to_s.strip
+  val.empty? ? default : val
+end
+
+def signing_error?(exception)
+  msg = exception.to_s.downcase
+  patterns = [
+    "no provisioning profile",
+    "no profiles for",
+    "provisioning profile",
+    "code signing",
+    "requires a provisioning profile"
+  ]
+  patterns.any? { |p| msg.include?(p) }
+end
+
+def missing_signing_assets?
+  keys = %w[
+    FASTLANE_TEAM_ID
+    FASTLANE_ITC_TEAM_ID
+    MATCH_GIT_URL
+    MATCH_PASSWORD
+  ]
+  keys.any? { |k| ENV[k].to_s.strip.empty? }
+end
+
+def poc_or_demo_repo?
+  repo = ENV["GITHUB_REPOSITORY"].to_s.downcase
+  repo.include?("poc") || repo.include?("demo")
+end
+
+def unsigned_fallback_enabled?
+  env_or("CICD_UNSIGNED_FALLBACK", "auto") == "true" ||
+    poc_or_demo_repo? ||
+    missing_signing_assets?
+end
+
+def run_unsigned_validation_build(project:, scheme:, configuration:)
+  UI.important("Switching to unsigned CI validation mode (compile/test only).")
+  build_app(
+    project: project,
+    scheme: scheme,
+    configuration: configuration,
+    clean: true,
+    skip_codesigning: true,
+    skip_package_ipa: true,
+    xcargs: "CODE_SIGNING_ALLOWED=NO"
+  )
+  UI.important("IPA generation is unavailable until signing assets are configured.")
+end
+
+def firebase_app_id_from_google_service_plist
+  plist_path = env_or("FIREBASE_PLIST_PATH", "cicd/GoogleService-Info.plist")
+  return ["", plist_path] unless File.exist?(plist_path)
+
+  content = File.read(plist_path)
+  match = content.match(/<key>GOOGLE_APP_ID<\/key>\s*<string>([^<]+)<\/string>/m)
+  app_id = match ? match[1].to_s.strip : ""
+  [app_id, plist_path]
+rescue => e
+  UI.important("Could not parse Firebase plist at #{plist_path}: #{e}")
+  ["", plist_path]
+end
+
+def write_distribution_status(status:, reason:)
+  status_file = env_or("CICD_DISTRIBUTION_STATUS_FILE", "fastlane/firebase_distribution_status.env")
+  FileUtils.mkdir_p(File.dirname(status_file))
+  File.write(status_file, "DISTRIBUTION_STATUS=#{status}\nDISTRIBUTION_REASON=#{reason}\n")
+end
+
+def select_available_ios_simulator(project:, scheme:, preferred_destination:)
+  begin
+    output, _status = Open3.capture2e("xcrun simctl list devices available")
+    output = output.to_s
+
+    simulators = output.lines.map(&:strip)
+                       .select { |line| line.start_with?("iPhone ") }
+                       .map { |line| line.sub(/\s*\(.+\)\s*$/, "").strip }
+                       .uniq
+
+    return preferred_destination if simulators.empty?
+
+    preferred_name = preferred_destination[/name=([^,]+)/, 1]
+    if preferred_name && simulators.include?(preferred_name)
+      return preferred_destination
+    end
+
+    chosen = simulators.find { |name| name.start_with?("iPhone") } || simulators.first
+    selected = "platform=iOS Simulator,name=#{chosen},OS=latest"
+    UI.important("Requested simulator was unavailable. Auto-selected: #{selected}")
+    selected
+  rescue => e
+    UI.important("Simulator auto-selection fallback failed: #{e}. Using requested destination.")
+    preferred_destination
+  end
+end
+
+def project_has_test_target?(project:, target_name:)
+  candidates = [
+    File.expand_path(File.join(project, "project.pbxproj"), Dir.pwd),
+    File.expand_path(File.join("..", project, "project.pbxproj"), Dir.pwd)
+  ]
+  pbxproj = candidates.find { |path| File.exist?(path) }
+  return false unless pbxproj
+
+  File.read(pbxproj).include?("/* #{target_name} */")
+end
 
 platform :ios do
 
+  # ==================== BEFORE ALL SETUP ====================
+  before_all do
+    # Set timeout environment variables to prevent xcodebuild timeout errors
+    ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"] = "180"
+    ENV["FASTLANE_XCODEBUILD_SETTINGS_RETRIES"] = "10"
+    ENV["XCBUILD_TIMEOUT"] = "300"
+    ENV["FASTLANE_OPT_OUT_USAGE"] = "YES"
+    
+    UI.message("🔧 Fastlane environment configured:")
+    UI.message("   - FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: #{ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"]}")
+    UI.message("   - FASTLANE_XCODEBUILD_SETTINGS_RETRIES: #{ENV["FASTLANE_XCODEBUILD_SETTINGS_RETRIES"]}")
+  end
+
+  # ==================== BUILD & TEST LANES ====================
+
   desc "Build app (CI)"
   lane :build do
-    project = ENV["CICD_PROJECT_FILE"] || "CI_CD_Project.xcodeproj"
-    scheme  = ENV["CICD_DEFAULT_SCHEME"] || "CI_CD_Project"
-    config  = ENV["CICD_DEFAULT_CONFIGURATION"] || "Debug"
+    project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
+    scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
+    config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
 
-    build_app(
-      project: project,
-      scheme: scheme,
-      configuration: config,
-      clean: true,
-      skip_package_ipa: true
-    )
+    UI.message("🔨 Building app: #{project} | Scheme: #{scheme} | Config: #{config}")
+
+    begin
+      build_app(
+        project: project,
+        scheme: scheme,
+        configuration: config,
+        clean: true,
+        skip_package_ipa: true
+      )
+    rescue => e
+      if signing_error?(e) && unsigned_fallback_enabled?
+        UI.important("Status: BLOCKED")
+        UI.important("Root Cause: Missing provisioning profile/signing assets for build lane")
+        UI.important("Assessment: Running unsigned CI validation build as fallback")
+        run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
+        next
+      end
+      raise e
+    end
   end
 
   desc "Run unit tests"
   lane :test do
-    project = ENV["CICD_PROJECT_FILE"] || "CI_CD_Project.xcodeproj"
-    scheme  = ENV["CICD_DEFAULT_SCHEME"] || "CI_CD_Project"
-    dest    = ENV["CICD_TEST_DESTINATION"] || "platform=iOS Simulator,name=iPhone 15"
+    project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
+    scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
 
-    run_tests(
+    requested_dest = env_or(
+      "CICD_TEST_DESTINATION",
+      "platform=iOS Simulator,name=iPhone 15,OS=latest"
+    )
+
+    unless project_has_test_target?(project: project, target_name: "cicdTests")
+      UI.user_error!("Test target 'cicdTests' is missing from project #{project}")
+    end
+
+    dest = select_available_ios_simulator(
       project: project,
       scheme: scheme,
-      destination: dest
+      preferred_destination: requested_dest
     )
+
+    UI.message("✅ Running tests: #{project} | Scheme: #{scheme}")
+    UI.message("   Destination: #{dest}")
+
+    begin
+      run_tests(
+        project: project,
+        scheme: scheme,
+        destination: dest,
+        only_testing: ["cicdTests"],
+        clean: true,
+        disable_concurrent_testing: true,
+        result_bundle: true,
+        output_directory: "fastlane/test_output",
+        output_types: "html,junit",
+        buildlog_path: "fastlane/logs",
+        derived_data_path: "fastlane/derived_data",
+        xcargs: "CODE_SIGNING_ALLOWED=NO -parallel-testing-enabled NO"
+      )
+    rescue => e
+      UI.error("Test execution failed. Attempting to print first actionable xcodebuild error...")
+      begin
+        sh("grep -E -m1 'xcodebuild: error:|error: |\\*\\* TEST FAILED \\*\\*' fastlane/logs/*.log ~/Library/Logs/scan/*.log 2>/dev/null || true")
+      rescue
+        UI.important("No scan log file available for quick grep.")
+      end
+      raise e
+    end
+
+    UI.success("✓ All tests passed!")
   end
+
+  desc "Build IPA for distribution"
+  lane :build_ipa do
+    project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
+    scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
+    config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
+    export_method = env_or("IPA_EXPORT_METHOD", "ad-hoc")
+
+    UI.message("📦 Building IPA: #{project} | Scheme: #{scheme} | Export: #{export_method}")
+
+    begin
+      build_app(
+        project: project,
+        scheme: scheme,
+        configuration: config,
+        clean: true,
+        export_method: export_method,
+        output_name: "cicd.ipa"
+      )
+    rescue => e
+      if signing_error?(e) && unsigned_fallback_enabled?
+        UI.important("Status: BLOCKED")
+        UI.important("Root Cause: Missing provisioning profile/signing assets")
+        UI.important("Assessment: Running unsigned CI validation build for POC/demo or missing-signing setup")
+        run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
+        next
+      end
+      raise e
+    end
+
+    UI.success("✓ IPA built successfully!")
+  end
+
+  # ==================== FIREBASE DISTRIBUTION ====================
+
+  desc "Build (ad-hoc) and distribute to Firebase App Distribution"
+  lane :firebase_distribute do
+    project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
+    scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
+    config  = env_or("CICD_DEFAULT_CONFIGURATION", "Debug")
+    app_id  = ENV["FIREBASE_APP_ID"].to_s.strip
+    groups  = env_or("FIREBASE_GROUPS", "testers")
+    firebase_token = ENV["FIREBASE_TOKEN"].to_s.strip
+    if firebase_token.empty?
+      firebase_token = ENV["FIREBASE_CLI_TOKEN"].to_s.strip
+    end
+
+    plist_app_id, plist_path = firebase_app_id_from_google_service_plist
+    if app_id.empty? && !plist_app_id.empty?
+      app_id = plist_app_id
+      UI.important("FIREBASE_APP_ID not set. Falling back to GOOGLE_APP_ID from #{plist_path}")
+    end
+    
+    notes   = env_or(
+      "RELEASE_NOTES",
+      "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}"
+    )
+
+    missing_prereqs = []
+    missing_prereqs << "FIREBASE_APP_ID" if app_id.empty?
+    missing_prereqs << "FIREBASE_TOKEN or FIREBASE_CLI_TOKEN" if firebase_token.empty?
+
+    if missing_prereqs.any?
+      UI.important("Status: BLOCKED")
+      UI.important("Missing Prerequisites:")
+      missing_prereqs.each { |item| UI.important("- #{item}") }
+      UI.important("⚠ Skipping Firebase Distribution")
+      UI.important("✅ Build and test stages can continue")
+      write_distribution_status(
+        status: "skipped",
+        reason: "Missing prerequisites: #{missing_prereqs.join(', ')}"
+      )
+      next
+    end
+
+    UI.message("🔥 Distributing to Firebase App Distribution")
+    UI.message("   App ID: #{app_id}")
+    UI.message("   Groups: #{groups}")
+    UI.message("   Notes: #{notes}")
+
+    # Build IPA with ad-hoc provisioning
+    begin
+      build_app(
+        project: project,
+        scheme: scheme,
+        configuration: config,
+        clean: true,
+        export_method: "ad-hoc",
+        output_name: "cicd.ipa"
+      )
+    rescue => e
+      if signing_error?(e) && unsigned_fallback_enabled?
+        UI.important("Status: BLOCKED")
+        UI.important("Root Cause: Missing provisioning profile for bundle id #{env_or("FASTLANE_BUNDLE_IDENTIFIER", "(unknown)")}")
+        UI.important("Assessment: This repository does not have signing assets configured.")
+        UI.important("Options:")
+        UI.important("1. CI Validation Build (Recommended for POC) - compile/test only, no IPA")
+        UI.important("2. Signed Build - configure certificates, profiles, and App Store Connect credentials")
+        run_unsigned_validation_build(project: project, scheme: scheme, configuration: config)
+        UI.important("Skipping Firebase upload because signed IPA is unavailable.")
+        write_distribution_status(
+          status: "skipped",
+          reason: "Signed IPA unavailable due to missing signing assets"
+        )
+        next
+      end
+      raise e
+    end
+
+    # Distribute via Firebase CLI
+    sh("firebase appdistribution:distribute cicd.ipa " \
+       "--app #{app_id} " \
+       "--release-notes '#{notes}' " \
+       "--groups '#{groups}' " \
+       "--token #{firebase_token}")
+
+    UI.success("✓ App distributed to Firebase successfully!")
+    write_distribution_status(status: "distributed", reason: "Firebase upload completed")
+  end
+
+  # ==================== RELEASE LANES ====================
 
   desc "Release build to TestFlight"
   lane :release do
-    project = ENV["CICD_PROJECT_FILE"]
-    scheme  = ENV["CICD_DEFAULT_SCHEME"]
-    notes   = ENV["RELEASE_NOTES"] || ""
+    project = env_or("CICD_PROJECT_FILE", "cicd.xcodeproj")
+    scheme  = env_or("CICD_DEFAULT_SCHEME", "cicd")
+    notes   = env_or("RELEASE_NOTES", "Bug fixes and improvements")
 
+    UI.message("🚀 Preparing TestFlight release: #{project}")
+
+    # Install signing certificates
     match(type: "appstore", readonly: true)
 
+    # Build and sign for App Store
     build_app(
       project: project,
       scheme: scheme,
       configuration: "Release",
-      clean: true
+      clean: true,
+      export_method: "app-store"
     )
 
+    # Upload to TestFlight
     upload_to_testflight(
       changelog: notes,
       skip_waiting_for_build_processing: true
     )
+
+    UI.success("✓ Release submitted to TestFlight successfully!")
   end
 
-  desc "Build (ad-hoc) and distribute to Firebase App Distribution"
-  lane :firebase_distribute do
-    project = ENV["CICD_PROJECT_FILE"] || "cicd.xcodeproj"
-    scheme  = ENV["CICD_DEFAULT_SCHEME"] || "cicd"
-    config  = ENV["CICD_DEFAULT_CONFIGURATION"] || "Debug"
-    app_id  = ENV["FIREBASE_APP_ID"]
-    groups  = ENV["FIREBASE_GROUPS"] || "testers"
-    notes   = ENV["RELEASE_NOTES"] || "Build #{last_git_commit[:abbreviated_commit_hash]} on #{git_branch}"
+  # ==================== NOTIFICATIONS ====================
 
-    UI.user_error!("FIREBASE_APP_ID must be set") if app_id.nil? || app_id.empty?
+  desc "Notify Teams of build status"
+  lane :notify_teams do |options|
+    webhook_url = ENV["TEAM_WEBHOOK_URL"].to_s.strip
+    if webhook_url.empty?
+      webhook_url = ENV["TEAMS_WEBHOOK_URL"].to_s.strip
+    end
+    
+    unless webhook_url && !webhook_url.empty?
+      UI.message("⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification")
+      next
+    end
 
-    match(type: "adhoc", readonly: true)
+    status = options[:status] || "unknown"
+    message = options[:message] || "Build #{status}"
 
-    build_app(
-      project: project,
-      scheme: scheme,
-      configuration: config,
-      clean: true,
-      export_method: "ad-hoc"
-    )
+    color = case status
+            when "success"
+              "28A745"
+            when "failure"
+              "DC3545"
+            when "started"
+              "0078D4"
+            else
+              "FFC107"
+            end
 
-    firebase_app_distribution(
-      app: app_id,
-      groups: groups,
-      release_notes: notes,
-      firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"]
-    )
+    emoji = case status
+            when "success"
+              "✅"
+            when "failure"
+              "❌"
+            when "started"
+              "🚀"
+            else
+              "⏹️"
+            end
+
+    UI.message("📧 Sending Teams notification: #{emoji} #{message}")
+
+    payload = {
+      "@type" => "MessageCard",
+      "@context" => "https://schema.org/extensions",
+      "summary" => message,
+      "themeColor" => color,
+      "sections" => [
+        {
+          "activityTitle" => "#{emoji} iOS Build #{status.capitalize}",
+          "facts" => [
+            { "name" => "Workflow", "value" => ENV["GITHUB_WORKFLOW"] || "Local" },
+            { "name" => "Branch", "value" => ENV["GITHUB_REF_NAME"] || git_branch }
+          ]
+        }
+      ]
+    }
+
+    begin
+      sh("curl --silent --show-error -X POST -H 'Content-Type: application/json' " \
+         "-d '#{payload.to_json}' " \
+         "'#{webhook_url}'")
+    rescue => e
+      UI.important("Notification delivery failed but will not fail the lane: #{e}")
+    end
+  end
+
+  # ==================== ERROR HANDLING ====================
+
+  error do |lane, exception|
+    UI.error("❌ Fastlane error in lane: #{lane}")
+    UI.error("Error message: #{exception}")
+    
+    # Notify Teams of failure if configured
+    begin
+      notify_teams(
+        status: "failure",
+        message: "Build failed in lane: #{lane}"
+      )
+    rescue => notify_error
+      UI.important("An error occurred while executing the error block notification: #{notify_error}")
+    end
   end
 
 end

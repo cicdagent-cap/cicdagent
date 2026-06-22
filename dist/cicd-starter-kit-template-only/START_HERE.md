@@ -12,4 +12,10 @@ This package does not include a prebuilt workflow file.
 CI_CD
 Create Pipeline
 
-4. Then set local env and GitHub Secrets/Variables.
+4. Set local env:
+
+cp .env.example .notification.local.env
+
+When you run Trigger Build, the script auto-syncs notification config to GitHub:
+- Secret: TEAM_WEBHOOK_URL
+- Variable: CICD_CHAT_PROVIDER

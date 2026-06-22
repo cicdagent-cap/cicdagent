@@ -43,6 +43,22 @@ if ! gh auth status >/dev/null 2>&1; then
   exit 1
 fi
 
+sync_notification_config() {
+  local repo="$1"
+  local webhook="${TEAM_WEBHOOK_URL:-${TEAMS_WEBHOOK_URL:-}}"
+  local provider="${CICD_CHAT_PROVIDER:-teams}"
+
+  if [ -z "$webhook" ]; then
+    echo "Notification sync skipped: TEAM_WEBHOOK_URL not set locally"
+    return
+  fi
+
+  echo "Syncing notification config to GitHub..."
+  gh secret set TEAM_WEBHOOK_URL --repo "$repo" --body "$webhook" >/dev/null
+  gh variable set CICD_CHAT_PROVIDER --repo "$repo" --body "$provider" >/dev/null
+  echo "Notification config synced (TEAM_WEBHOOK_URL secret + CICD_CHAT_PROVIDER variable)"
+}
+
 # Extract repo + workflow file
 if [[ "$TARGET" =~ github.com/([^/]+/[^/]+)/actions/workflows/([^/?#]+) ]]; then
   REPO="${BASH_REMATCH[1]}"
@@ -51,6 +67,8 @@ else
   echo "Invalid workflow URL"
   exit 1
 fi
+
+sync_notification_config "$REPO"
 
 # Check for recent pending/in-progress runs to prevent accidental double triggers
 echo "Checking for recent runs..."

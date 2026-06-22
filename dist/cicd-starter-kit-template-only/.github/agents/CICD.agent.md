@@ -12,6 +12,31 @@ description: CI/CD Agent for pipeline creation and build triggering
 
 ---
 
+## Bootstrap Auto-Detection
+
+**On first run**, the agent checks if CI/CD files are present:
+- If `.env.example` exists → CI/CD is set up, show banner
+- If `.env.example` missing → Run bootstrap automatically
+
+### Bootstrap Flow
+
+Ask:
+1. **Project path** (default: current directory)
+2. **Bundle ID** (e.g., `com.example.myapp`)
+
+Then run:
+```bash
+chmod +x scripts/bootstrap_new_ios_repo.sh
+./scripts/bootstrap_new_ios_repo.sh <project-path> <bundle-id>
+```
+
+After bootstrap completes:
+- All CI/CD files are copied
+- Project name and scheme auto-detected from `.xcodeproj`
+- Show the main banner
+
+---
+
 ## Banner (show once)
 
 CI/CD Agent

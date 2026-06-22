@@ -9,9 +9,9 @@ target:
   workflow_url: https://github.com/gma-org/gmap-ios/actions/workflows/Core.yml
 
   # Default options:
-  # 1) staging-trunk
+  # 1) main
   # 2) Custom (replace with your input)
-  branch_name: staging-trunk
+  branch_name: main
 
 workflow_inputs:
   preset: Debug-CICD-MTE

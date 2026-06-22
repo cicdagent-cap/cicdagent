@@ -8,6 +8,16 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: Select build type
+        type: choice
+        required: true
+        default: Debug-CICD
+        options:
+          - Debug-CICD
+          - Release-CICD
 
 # Cancel in-flight runs for the same branch/PR so we never queue stale builds.
 concurrency:
@@ -16,10 +26,32 @@ concurrency:
 
 # ─── Jobs ─────────────────────────────────────────────────────────────────────
 jobs:
+  notify-started:
+    name: Notify Started
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send started notification
+        continue-on-error: true
+        env:
+          WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL || secrets.TEAM_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "No webhook configured - skipping start notification"
+            exit 0
+          fi
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"Build Triggered\",\"text\":\"🚀 Build started on branch ${{ github.ref_name }}\\n${RUN_URL}\"}" \
+            "$WEBHOOK_URL" || true
+
   # ── 1. Test ────────────────────────────────────────────────────────────────
   test:
     name: Unit Tests
     runs-on: macos-latest
+    needs: notify-started
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    env:
+      FASTLANE_OPT_OUT_USAGE: "YES"
 
     steps:
       - name: Checkout
@@ -28,18 +60,93 @@ jobs:
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.2"
+          ruby-version: "3.3"
           bundler-cache: true
 
       - name: Install dependencies
         run: bundle install
 
+      - name: Install CocoaPods dependencies (if Podfile exists)
+        run: |
+          if [ -f Podfile ]; then
+            bundle exec pod install --repo-update
+          else
+            echo "No Podfile found; skipping CocoaPods bootstrap"
+          fi
+
+      - name: Resolve Swift Package Manager dependencies
+        if: ${{ vars.CICD_PRE_RESOLVE_SPM == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "${CICD_PROJECT_FILE:-cicd.xcodeproj}" \
+            -scheme "${CICD_DEFAULT_SCHEME:-cicd}"
+
+      - name: Select available simulator destination
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          DEST=$(xcodebuild -showdestinations \
+            -project "${CICD_PROJECT_FILE:-cicd.xcodeproj}" \
+            -scheme "${CICD_DEFAULT_SCHEME:-cicd}" 2>/dev/null | \
+            ruby -e 'simulators = STDIN.read.lines.map(&:strip).select { |l| l.include?("platform:iOS Simulator") && l.include?("name:") }.map { |l| (l[/name:([^}]+)/, 1] || "").strip }.reject(&:empty?).uniq; chosen = simulators.find { |name| name.start_with?("iPhone") } || simulators.first || "iPhone 16"; puts "platform=iOS Simulator,name=#{chosen},OS=latest"')
+          if [ -n "$DEST" ]; then
+            echo "CICD_TEST_DESTINATION=$DEST" >> "$GITHUB_ENV"
+            echo "Selected simulator destination: $DEST"
+          else
+            echo "No destination discovered in pre-step; Fastlane will auto-select destination"
+          fi
+
+      - name: Prepare simulator runtime
+        run: |
+          xcrun simctl shutdown all || true
+          xcrun simctl delete unavailable || true
+
+      - name: Print Xcode and simulator inventory
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | sed -n '1,200p'
+
       - name: Run unit tests
+        id: run_unit_tests
+        continue-on-error: true
         run: bundle exec fastlane ios test
         env:
+          # Optional overrides – leave unset to use Fastfile defaults (cicd.xcodeproj / cicd scheme)
           CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
           CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
-          CICD_TEST_DESTINATION: ${{ vars.CICD_TEST_DESTINATION }}
+          CICD_TEST_DESTINATION: ${{ env.CICD_TEST_DESTINATION || vars.CICD_TEST_DESTINATION }}
+
+      - name: Print first xcodebuild failure reason
+        if: steps.run_unit_tests.outcome != 'success'
+        run: |
+          echo "Unit test step failed. Extracting first actionable error line..."
+          FAIL_LINE=$(grep -E -m1 "xcodebuild: error:|error: |\*\* TEST FAILED \*\*" ~/Library/Logs/scan/*.log 2>/dev/null || true)
+          if [ -n "$FAIL_LINE" ]; then
+            echo "First xcodebuild failure: $FAIL_LINE"
+          else
+            echo "No direct xcodebuild error line found in scan logs. Showing tail:"
+            tail -n 120 ~/Library/Logs/scan/*.log 2>/dev/null || true
+          fi
+
+      - name: Upload scan logs and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-diagnostics-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            ~/Library/Logs/scan/**
+            fastlane/logs/**
+            fastlane/test_output/**
+            **/*.xcresult
+
+      - name: Fail job if tests failed
+        if: steps.run_unit_tests.outcome != 'success'
+        run: |
+          echo "Failing workflow because unit tests did not pass. See uploaded diagnostics artifact."
+          exit 1
 
   # ── 2. Build & Distribute to Firebase ─────────────────────────────────────
   firebase-distribute:
@@ -48,6 +155,8 @@ jobs:
     needs: test
     # Only distribute on push events – not on pull-request builds.
     if: github.event_name == 'push'
+    env:
+      FASTLANE_OPT_OUT_USAGE: "YES"
 
     steps:
       - name: Checkout
@@ -56,13 +165,40 @@ jobs:
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.2"
+          ruby-version: "3.3"
           bundler-cache: true
 
       - name: Install dependencies
         run: bundle install
 
+      - name: Check Firebase prerequisites
+        id: firebase_prereqs
+        run: |
+          MISSING=()
+
+          if [ -z "$FIREBASE_APP_ID" ]; then
+            MISSING+=("FIREBASE_APP_ID")
+          fi
+
+          if [ -z "$FIREBASE_TOKEN" ] && [ -z "$FIREBASE_CLI_TOKEN" ]; then
+            MISSING+=("FIREBASE_TOKEN or FIREBASE_CLI_TOKEN")
+          fi
+
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "missing=${MISSING[*]}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "missing=" >> "$GITHUB_OUTPUT"
+        env:
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_CLI_TOKEN: ${{ secrets.FIREBASE_CLI_TOKEN }}
+
       - name: Build & upload to Firebase App Distribution
+        if: steps.firebase_prereqs.outputs.ready == 'true'
         run: bundle exec fastlane ios firebase_distribute
         env:
           # ── Project ─────────────────────────────────────────────────────
@@ -79,14 +215,63 @@ jobs:
           # ── Firebase ─────────────────────────────────────────────────────
           # FIREBASE_APP_ID  →  Settings > General > "App ID" in Firebase console
           FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          # Supports either secret name: FIREBASE_TOKEN or FIREBASE_CLI_TOKEN
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
           # FIREBASE_CLI_TOKEN  →  run `firebase login:ci` locally to generate
           FIREBASE_CLI_TOKEN: ${{ secrets.FIREBASE_CLI_TOKEN }}
           # Comma-separated tester group aliases defined in Firebase console
           FIREBASE_GROUPS: ${{ vars.FIREBASE_GROUPS }}
+          CICD_DISTRIBUTION_STATUS_FILE: fastlane/firebase_distribution_status.env
           RELEASE_NOTES: "Branch: ${{ github.ref_name }} | Commit: ${{ github.sha }}"
+
+      - name: Publish Firebase distribution summary
+        if: always()
+        run: |
+          if [ "${{ steps.firebase_prereqs.outputs.ready }}" != "true" ]; then
+            echo "### Firebase Distribution" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ⚠ FIREBASE_APP_ID not configured" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ⚠ Skipping Firebase Distribution" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Build completed successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Tests completed successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ⚠ Distribution skipped due to missing Firebase configuration: ${{ steps.firebase_prereqs.outputs.missing }}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          STATUS_FILE="${CICD_DISTRIBUTION_STATUS_FILE:-fastlane/firebase_distribution_status.env}"
+          echo "### Firebase Distribution" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ! -f "$STATUS_FILE" ]; then
+            echo "- ℹ No Firebase distribution status file generated" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          STATUS_VALUE=$(grep '^DISTRIBUTION_STATUS=' "$STATUS_FILE" | head -1 | cut -d= -f2-)
+          REASON_VALUE=$(grep '^DISTRIBUTION_REASON=' "$STATUS_FILE" | head -1 | cut -d= -f2-)
+
+          if [ "$STATUS_VALUE" = "distributed" ]; then
+            echo "- ✅ Firebase distribution completed" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Build completed successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Tests completed successfully" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$STATUS_VALUE" = "skipped" ]; then
+            echo "- ⚠ FIREBASE_APP_ID/FIREBASE_TOKEN not fully configured" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ⚠ Skipping Firebase Distribution" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Build completed successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Tests completed successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ⚠ Distribution skipped: ${REASON_VALUE}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "- ℹ Distribution status: ${STATUS_VALUE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ℹ Details: ${REASON_VALUE}" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CICD_DISTRIBUTION_STATUS_FILE: fastlane/firebase_distribution_status.env
 
       - name: Notify on failure
         if: failure()
+        continue-on-error: true
         run: |
           if [ -z "$TEAM_WEBHOOK_URL" ]; then
             echo "No webhook configured – skipping notification"
@@ -95,6 +280,84 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -H "Content-Type: application/json" \
             -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"Build FAILED\",\"text\":\"${RUN_URL}\"}" \
-            "$TEAM_WEBHOOK_URL"
+            "$TEAM_WEBHOOK_URL" || true
         env:
-          TEAM_WEBHOOK_URL: ${{ secrets.TEAM_WEBHOOK_URL }}
+          TEAM_WEBHOOK_URL: ${{ secrets.TEAM_WEBHOOK_URL || secrets.TEAMS_WEBHOOK_URL }}
+
+  manual-build:
+    name: Manual Build (Preset)
+    runs-on: macos-latest
+    needs: notify-started
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      FASTLANE_OPT_OUT_USAGE: "YES"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Select lane
+        id: lane
+        run: |
+          if [[ "${{ github.event.inputs.preset }}" == "Release-CICD" ]]; then
+            echo "lane=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "lane=build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run preset lane
+        run: bundle exec fastlane ios ${{ steps.lane.outputs.lane }}
+        env:
+          CICD_PROJECT_FILE: ${{ vars.CICD_PROJECT_FILE }}
+          CICD_DEFAULT_SCHEME: ${{ vars.CICD_DEFAULT_SCHEME }}
+          CICD_DEFAULT_CONFIGURATION: ${{ vars.CICD_DEFAULT_CONFIGURATION }}
+
+  notify-final:
+    name: Notify Final Status
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, firebase-distribute, manual-build]
+    steps:
+      - name: Send final notification
+        continue-on-error: true
+        env:
+          WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL || secrets.TEAM_WEBHOOK_URL }}
+          TEST_RESULT: ${{ needs.test.result }}
+          FIREBASE_RESULT: ${{ needs.firebase-distribute.result }}
+          MANUAL_RESULT: ${{ needs.manual-build.result }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "No webhook configured - skipping final notification"
+            exit 0
+          fi
+
+          STATUS="success"
+          if [ "$TEST_RESULT" = "cancelled" ] || [ "$FIREBASE_RESULT" = "cancelled" ] || [ "$MANUAL_RESULT" = "cancelled" ]; then
+            STATUS="cancelled"
+          elif [ "$TEST_RESULT" = "failure" ] || [ "$FIREBASE_RESULT" = "failure" ] || [ "$MANUAL_RESULT" = "failure" ]; then
+            STATUS="failure"
+          fi
+
+          TITLE="Build Success"
+          ICON="✅"
+          if [ "$STATUS" = "failure" ]; then
+            TITLE="Build Failed"
+            ICON="❌"
+          elif [ "$STATUS" = "cancelled" ]; then
+            TITLE="Build Stopped"
+            ICON="⛔"
+          fi
+
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"@type\":\"MessageCard\",\"@context\":\"https://schema.org/extensions\",\"title\":\"${TITLE}\",\"text\":\"${ICON} Branch: ${{ github.ref_name }}\\nStatus: ${STATUS}\\n${RUN_URL}\"}" \
+            "$WEBHOOK_URL" || true

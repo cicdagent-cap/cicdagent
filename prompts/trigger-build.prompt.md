@@ -1,53 +1,126 @@
 # Trigger Build Flow
 
-## Step 1: Ask user
+## Step 1: Resolve workflow
 
-Provide:
-1. Workflow URL (default options):
-   - https://github.com/gma-org/gmap-ios/actions/workflows/Core.yml
-   - https://github.com/gma-org/gmap-ios/actions/workflows/DE.yml
-   - Custom (input text field)
-2. Branch name (default options):
-   - staging-trunk
-   - Custom (input text field)
+Ask the user:
+1. Workflow to trigger:
+   - List workflows found in `.github/workflows/` (auto-detected)
+   - Or: Custom URL
+2. Branch name:
+   - Ask for explicit consent on branch selection before trigger
+   - Default: `main`
+   - Or: Custom branch
+
+Consent example:
+
+```
+Trigger this build on branch `main`? (yes/no)
+```
+
+Do not dispatch until branch consent is explicit.
 
 ---
 
-## Step 2: Inspect workflow
+## Step 1.5: Prerequisite checks (required)
+
+Run shared preflight first:
+
+```bash
+./scripts/preflight_validate.sh \
+   --action trigger-build \
+   --workflow-url <workflow-url> \
+   --branch <branch-name>
+```
+
+Then validate and report:
+1. Workflow exists
+2. Workflow is enabled/active
+3. Caller has permission to dispatch
+4. Required inputs are valid
+5. Required secrets/variables for requested lane are present
+6. Signing prerequisites for signed outputs are present
+
+If any prerequisite is missing:
+- Do not fail with a generic error.
+- Explain what is missing and why it matters.
+- Provide exact remediation steps.
+- Offer alternatives when available, for example:
+   1. Configure signing assets for signed IPA
+   2. Run unsigned CI validation build
+   3. Configure Fastlane Match
+
+Only trigger after prerequisites pass (or user explicitly chooses an alternative path).
+
+---
+
+## Step 2: Inspect workflow inputs
 
 Run:
 
-./scripts/inspect_workflow_inputs.sh <workflow-url> <branch>
+```bash
+./scripts/inspect_workflow_inputs.sh <workflow-url> [branch=main]
+```
+
+Parse the output and show only the discovered inputs to the user.
 
 ---
 
 ## Step 3: Ask inputs dynamically
 
-Show only discovered inputs
+Render only inputs returned by the inspect script.
 
-Example:
+Common inputs example:
 
-Provide:
-
+```
 1. preset:
-   - Debug-CICD
+   - Debug-CICD (default)
    - Release-CICD
 
-2. config_Override:
-   - None
-   - a: Feature A Enabled
-
-3. Release_Notes (optional)
+2. release_notes (optional, free text)
+```
 
 ---
 
 ## Step 4: Trigger build
 
-Before triggering, check local environment setup through the trigger script output.
+Check environment:
 
-Show this when configured:
+```bash
+./scripts/trigger_existing_workflow.sh <workflow-url> [branch=main] [inputs...]
+```
 
-Environment: Configured via local file or GitHub
+Show concise status:
+
+```
+Environment: Configured ✓
+Triggering: <workflow> on <branch>
+Teams: Build Started notification sent (if webhook configured)
+```
+
+Return:
+- Workflow name
+- Run ID
+- Build URL
+- Current status
+
+If `GH_TOKEN` is missing:
+
+```
+Missing env setup → add GH_TOKEN to .notification.local.env
+```
+
+---
+
+## Step 5: Post-trigger
+
+After a successful trigger, offer:
+- View run: `gh run list --workflow=<name>`
+- Open PR against `main` if build is from a feature branch
+
+Also include short monitoring guidance:
+- Check live status
+- Capture failure reason and failing job
+- Provide immediate remediation recommendations
 
 Show this when missing:
 
@@ -70,6 +143,25 @@ Release_Notes="<value>"
 Build triggered successfully
 
 Run URL: <github-run-url>
+
+---
+
+## Required Response Format
+
+### Status
+PASS / FAIL / BLOCKED
+
+### Findings
+- List findings with root cause + impact
+
+### Missing Prerequisites
+- Explicit list (or "None")
+
+### Recommended Actions
+1. Ordered by priority
+
+### Next Action
+- Single best next step
 
 ---
 

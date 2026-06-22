@@ -1,67 +1,220 @@
-name: CI_CD iOS Pipeline
+name: iOS CI/CD Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
     branches: [main]
   workflow_dispatch:
     inputs:
-      preset:
-        description: Select build type
-        type: choice
+      environment:
+        description: 'Deployment environment'
         required: true
-        default: Debug-CICD
+        default: 'development'
+        type: choice
         options:
-          - Debug-CICD
-          - Release-CICD
+          - development
+          - staging
+          - production
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 180
+  FASTLANE_XCODEBUILD_SETTINGS_RETRIES: 10
+  XCBUILD_TIMEOUT: 300
+  FASTLANE_OPT_OUT_USAGE: YES
 
 jobs:
-  ios:
+  build:
     runs-on: macos-latest
+    name: Build & Test
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Ruby
+      - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.2'
           bundler-cache: true
 
-      - name: Install dependencies
-        run: bundle install
-
-      - name: Select lane
-        id: lane
-        run: |
-          if [[ "${{ github.event.inputs.preset }}" == "Release-CICD" ]]; then
-            echo "lane=release" >> $GITHUB_OUTPUT
-          else
-            echo "lane=build" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Run Fastlane
-        run: bundle exec fastlane ios ${{ steps.lane.outputs.lane }}
-
-      - name: Notify Teams (if configured)
+      - name: Notify Teams - Build Started
         if: always()
+        continue-on-error: true
         run: |
-          STATUS="${{ job.status }}"
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-          if [ -z "$TEAM_WEBHOOK_URL" ]; then
-            echo "No webhook configured"
+          if [ -z "${{ secrets.TEAMS_WEBHOOK_URL }}" ]; then
+            echo "⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification"
             exit 0
           fi
+          
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "summary": "iOS Build Started",
+            "themeColor": "0078D4",
+            "sections": [
+              {
+                "activityTitle": "🚀 iOS Build Started",
+                "facts": [
+                  {"name": "Workflow", "value": "${{ github.workflow }}"},
+                  {"name": "Run Number", "value": "#${{ github.run_number }}"},
+                  {"name": "Branch", "value": "${{ github.ref_name }}"},
+                  {"name": "Commit", "value": "${{ github.sha }}"}
+                ],
+                "potentialAction": [
+                  {
+                    "name": "View Workflow",
+                    "targets": [
+                      {"os": "default", "uri": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+                    ]
+                  }
+                ]
+              }
+            ]
+          }' \
+          "${{ secrets.TEAMS_WEBHOOK_URL }}"
 
-          curl -H "Content-Type: application/json" \
-          -d "{
-            \"@type\": \"MessageCard\",
-            \"@context\": \"https://schema.org/extensions\",
-            \"title\": \"Build ${STATUS}\",
-            \"text\": \"${RUN_URL}\"
-          }" \
-          "$TEAM_WEBHOOK_URL"
+      - name: Resolve Swift Packages
+        run: xcodebuild -resolvePackageDependencies
+
+      - name: Build & Run Tests
+        run: bundle exec fastlane ios test
+        continue-on-error: true
+
+      - name: Build Application
+        run: bundle exec fastlane ios build
+
+      - name: Build IPA for Distribution
+        run: bundle exec fastlane ios build_ipa
+
+      - name: Upload IPA as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: cicd-app
+          path: cicd.ipa
+          retention-days: 7
+
+      - name: Distribute to Firebase App Distribution
+        if: success()
+        run: bundle exec fastlane ios firebase_distribute
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_GROUPS: ${{ vars.FIREBASE_GROUPS }}
+        continue-on-error: true
+
+      - name: Notify Teams - Build Completed (Success)
+        if: success()
+        continue-on-error: true
+        run: |
+          if [ -z "${{ secrets.TEAMS_WEBHOOK_URL }}" ]; then
+            echo "⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification"
+            exit 0
+          fi
+          
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "summary": "iOS Build Completed Successfully",
+            "themeColor": "28A745",
+            "sections": [
+              {
+                "activityTitle": "✅ iOS Build Completed Successfully",
+                "facts": [
+                  {"name": "Workflow", "value": "${{ github.workflow }}"},
+                  {"name": "Run Number", "value": "#${{ github.run_number }}"},
+                  {"name": "Branch", "value": "${{ github.ref_name }}"},
+                  {"name": "Duration", "value": "${{ job.duration }} seconds"}
+                ],
+                "potentialAction": [
+                  {
+                    "name": "View Details",
+                    "targets": [
+                      {"os": "default", "uri": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+                    ]
+                  }
+                ]
+              }
+            ]
+          }' \
+          "${{ secrets.TEAMS_WEBHOOK_URL }}"
+
+      - name: Notify Teams - Build Failed
+        if: failure()
+        continue-on-error: true
+        run: |
+          if [ -z "${{ secrets.TEAMS_WEBHOOK_URL }}" ]; then
+            echo "⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification"
+            exit 0
+          fi
+          
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "summary": "iOS Build Failed",
+            "themeColor": "DC3545",
+            "sections": [
+              {
+                "activityTitle": "❌ iOS Build Failed",
+                "facts": [
+                  {"name": "Workflow", "value": "${{ github.workflow }}"},
+                  {"name": "Run Number", "value": "#${{ github.run_number }}"},
+                  {"name": "Branch", "value": "${{ github.ref_name }}"},
+                  {"name": "Commit", "value": "${{ github.sha }}"}
+                ],
+                "potentialAction": [
+                  {
+                    "name": "View Error Details",
+                    "targets": [
+                      {"os": "default", "uri": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+                    ]
+                  }
+                ]
+              }
+            ]
+          }' \
+          "${{ secrets.TEAMS_WEBHOOK_URL }}"
+
+      - name: Notify Teams - Build Cancelled
+        if: cancelled()
+        continue-on-error: true
+        run: |
+          if [ -z "${{ secrets.TEAMS_WEBHOOK_URL }}" ]; then
+            echo "⚠️ TEAMS_WEBHOOK_URL not configured, skipping notification"
+            exit 0
+          fi
+          
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "summary": "iOS Build Cancelled",
+            "themeColor": "FFC107",
+            "sections": [
+              {
+                "activityTitle": "⏹️ iOS Build Cancelled",
+                "facts": [
+                  {"name": "Workflow", "value": "${{ github.workflow }}"},
+                  {"name": "Run Number", "value": "#${{ github.run_number }}"},
+                  {"name": "Branch", "value": "${{ github.ref_name }}"}
+                ],
+                "potentialAction": [
+                  {
+                    "name": "View Details",
+                    "targets": [
+                      {"os": "default", "uri": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+                    ]
+                  }
+                ]
+              }
+            ]
+          }' \
+          "${{ secrets.TEAMS_WEBHOOK_URL }}"
 ``

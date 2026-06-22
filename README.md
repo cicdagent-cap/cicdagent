@@ -2,6 +2,24 @@
 
 This repository contains an iOS Swift project with GitHub Actions, Fastlane, local build-trigger scripts, and a workspace CICD agent flow.
 
+## First Step For Any New Project
+
+Before using CICD agent modes (`Create Pipeline` or `Trigger Build`) in a new repository, run the standard onboarding checklist in:
+
+- `CICD_HOT_RUN_SETUP.md`
+
+Fast path (recommended):
+
+```bash
+./scripts/bootstrap_new_ios_repo.sh <target-repo-path> <bundle-id>
+```
+
+Example:
+
+```bash
+./scripts/bootstrap_new_ios_repo.sh /Users/you/projects/MyiOSApp com.example.myiosapp
+```
+
 ## Quick Start
 
 For local setup, copy the example environment file:

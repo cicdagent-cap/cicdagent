@@ -73,7 +73,8 @@ HTTP_CODE=$(curl --write-out '%{http_code}' --silent --output /tmp/notify_respon
   -d "${PAYLOAD}" \
   "${TEAM_WEBHOOK_URL}")
 
-if [ "${HTTP_CODE}" -eq 200 ]; then
+# Accept both 200 (OK) and 202 (Accepted)
+if [[ "$HTTP_CODE" =~ ^20[02]$ ]]; then
   echo "Team notification sent: $READABLE_STATUS"
 else
   echo "[WARNING] Notification failed with HTTP ${HTTP_CODE}"

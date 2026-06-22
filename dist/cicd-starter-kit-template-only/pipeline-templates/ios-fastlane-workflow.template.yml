@@ -83,26 +83,12 @@ jobs:
       # ✅ NOTIFICATION (OPTIONAL)
       - name: Notify (Teams/Slack)
         if: always()
+        env:
+          TEAM_WEBHOOK_URL: ${{ secrets.TEAM_WEBHOOK_URL }}
+          CICD_CHAT_PROVIDER: ${{ vars.CICD_CHAT_PROVIDER }}
         run: |
           STATUS="${{ job.status }}"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-          if [ -z "$TEAM_WEBHOOK_URL" ]; then
-            echo "No webhook configured"
-            exit 0
-          fi
-
-          if [ "$CICD_CHAT_PROVIDER" = "teams" ]; then
-            PAYLOAD=$(printf '{
-              "@type": "MessageCard",
-              "@context": "https://schema.org/extensions",
-              "title": "Build %s",
-              "text": "%s"
-            }' "$STATUS" "$RUN_URL")
-          else
-            PAYLOAD=$(printf '{"text":"Build %s - %s"}' "$STATUS" "$RUN_URL")
-          fi
-
-          curl -H "Content-Type: application/json" \
-               -d "$PAYLOAD" \
-               "$TEAM_WEBHOOK_URL"
+          BRANCH="${{ github.ref_name }}"
+          
+          ./scripts/notify.sh "$STATUS" "$RUN_URL" "$BRANCH"
